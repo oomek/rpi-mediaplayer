@@ -54,6 +54,14 @@ enum flags
 #define SET_FLAG(flag) { pthread_mutex_lock (&flags_mutex); flags |= flag; pthread_mutex_unlock (&flags_mutex); }
 #define UNSET_FLAG(flag) { pthread_mutex_lock (&flags_mutex); flags &= ~flag; pthread_mutex_unlock (&flags_mutex); }
 #define OMX_INIT_PARAM(type) memset (&type, 0x0, sizeof (type)); type.nSize = sizeof (type); type.nVersion.nVersion = OMX_VERSION;
+#define OMX_INIT_STRUCTURE(a) \
+    memset(&(a), 0, sizeof(a)); \
+    (a).nSize = sizeof(a); \
+    (a).nVersion.nVersion = OMX_VERSION; \
+    (a).nVersion.s.nVersionMajor = OMX_VERSION_MAJOR; \
+    (a).nVersion.s.nVersionMinor = OMX_VERSION_MINOR; \
+    (a).nVersion.s.nRevision = OMX_VERSION_REVISION; \
+    (a).nVersion.s.nStep = OMX_VERSION_STEP
 
 // Demuxing variables (ffmpeg)
 static AVFormatContext      * fmt_ctx          = NULL;
@@ -84,9 +92,13 @@ static ILCLIENT_T           * client;
 
 static OMX_BUFFERHEADERTYPE * omx_video_buffer,
                             * omx_audio_buffer,
-                            * omx_egl_buffer;
+                            * omx_egl_buffer,
+                            * omx_egl_buffer2,
+                            * omx_egl_buffer_tmp;
 
 static void                 * egl_image = NULL;
+static void                 * egl_image2 = NULL;
+static int                  * current_texture = NULL;
 static int32_t                flags     =  0;
 
 // Helpers
@@ -151,14 +163,17 @@ static inline void unlock ()
  */
 static void fill_egl_texture_buffer (void* data, COMPONENT_T* c)
 {
-	pthread_mutex_lock (&buffer_filled_mut);
-	if ((~flags & STOPPED) &&
-		OMX_FillThisBuffer (ilclient_get_handle (egl_render), omx_egl_buffer) != OMX_ErrorNone)
+	if (~flags & STOPPED)
 	{
-		fprintf (stderr, "OMX_FillThisBuffer failed for egl buffer in callback\n");
+		*current_texture = 1 - *current_texture;
+		omx_egl_buffer_tmp = omx_egl_buffer;
+		omx_egl_buffer = omx_egl_buffer2;
+		omx_egl_buffer2 = omx_egl_buffer_tmp;
+		int err = OMX_FillThisBuffer (ilclient_get_handle (egl_render), omx_egl_buffer);
+		if ( err != OMX_ErrorNone )
+			fprintf (stderr, "OMX_FillThisBuffer failed for egl buffer in callback\n");
+
 	}
-	pthread_cond_broadcast (&buffer_filled_cond);
-	pthread_mutex_unlock (&buffer_filled_mut);
 }
 
 /**
@@ -169,9 +184,14 @@ static inline int decode_video_packet ()
 {
 	int packet_size = 0;
 	OMX_TICKS ticks = omx_timestamp (video_packet);
+
 	// packet data can be larger than decoder buffer
 	while (video_packet.size > 0)
 	{
+		// printf( "high: %d low : %d\n", ticks.nHighPart, ticks.nLowPart );
+		// fix for uneven framerate. not an elegant solution, needs investigating
+		// ticks.nLowPart += 16666 * 1.5;
+		// ticks.nLowPart += 1000;
 		// feed data to video decoder
 		if ((omx_video_buffer = ilclient_get_input_buffer (video_decode, VIDEO_DECODE_INPUT_PORT, 1)) == NULL)
 		{
@@ -235,6 +255,23 @@ static inline int decode_video_packet ()
 					fprintf (stderr, "OMX_UseEGLImage failed.\n");
 					return 1;
 				}
+
+				if (OMX_UseEGLImage (ILC_GET_HANDLE (egl_render), &omx_egl_buffer2, EGL_RENDER_OUT_PORT, NULL, egl_image2) != OMX_ErrorNone)
+				{
+					fprintf (stderr, "OMX_UseEGLImage failed.\n");
+					return 1;
+				}
+
+				OMX_PARAM_PORTDEFINITIONTYPE portFormat;
+				OMX_INIT_STRUCTURE(portFormat);
+				portFormat.nPortIndex = EGL_RENDER_OUT_PORT;
+
+				OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+
+				printf("nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+				printf("nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+				printf("nBufferAlignment: %d\n", portFormat.nBufferAlignment );
+
 				// Set egl_render to executing
 				ilclient_change_component_state (egl_render, OMX_StateExecuting);
 				// Request egl_render to write data to the texture buffer
@@ -275,10 +312,10 @@ static void video_decoding_thread ()
 			WAIT_WHILE_PAUSED
 		}
 		// get packet
-		pthread_mutex_lock (&video_mutex);
+		// pthread_mutex_lock (&video_mutex);
 		if ((ret = pop_packet (&video_packet_fifo, &video_packet)) != 0)
 		{
-			pthread_mutex_unlock (&video_mutex);
+			// pthread_mutex_unlock (&video_mutex);
 			usleep (FIFO_SLEEPY_TIME);
 			continue;
 		}
@@ -287,7 +324,7 @@ static void video_decoding_thread ()
 		ret = decode_video_packet ();
 		video_packet.data = d;
 		av_packet_unref (&video_packet);
-		pthread_mutex_unlock (&video_mutex);
+		// pthread_mutex_unlock (&video_mutex);
 		if (ret != 0)
 		{
 			fprintf (stderr, "Error while decoding, ending thread\n");
@@ -467,10 +504,10 @@ static void audio_decoding_thread ()
 			WAIT_WHILE_PAUSED
 		}
 		// pop a audio packet from the decoding queue
-		pthread_mutex_lock (&audio_mutex);
+		// pthread_mutex_lock (&audio_mutex);
 		if ((ret = pop_packet (&audio_packet_fifo, &audio_packet)) != 0)
 		{
-			pthread_mutex_unlock (&audio_mutex);
+			// pthread_mutex_unlock (&audio_mutex);
 			usleep (FIFO_SLEEPY_TIME);
 			continue;
 		}
@@ -478,7 +515,7 @@ static void audio_decoding_thread ()
 		d = audio_packet.data;
 		ret = flags & HARDWARE_DECODE_AUDIO ? hardwaredecode_audio_packet () : decode_audio_packet () ;
 		audio_packet.data = d;
-		pthread_mutex_unlock (&audio_mutex);
+		// pthread_mutex_unlock (&audio_mutex);
 
 		// deallocate packet
 		if (ret == 0)
@@ -550,6 +587,21 @@ static int open_video ()
 	}
 	list[0] = video_decode;
 
+	// Fix for hang on ilclient_disable_port_buffers
+	// Need to find a better solution as it degrades the performance.
+	// Also the colorspace of decoded frames switches to limited.
+
+	// OMX_PARAM_BRCMDISABLEPROPRIETARYTUNNELSTYPE tunnelConfig;
+	// OMX_INIT_STRUCTURE(tunnelConfig);
+	// tunnelConfig.nPortIndex = 131;
+	// tunnelConfig.bUseBuffers = OMX_TRUE;
+	// if (OMX_SetParameter(ILC_GET_HANDLE(video_decode), OMX_IndexParamBrcmDisableProprietaryTunnels, &tunnelConfig) != OMX_ErrorNone)
+	// {
+	// 	printf("OMX_IndexParamBrcmDisableProprietaryTunnels failed.\n");
+	// 	exit(1);
+	// }
+
+
 	// create the render component which is either a video_render (the display) or egl_render (texture)
 	if (flags & RENDER_2_TEXTURE)
 	{
@@ -562,6 +614,14 @@ static int open_video ()
 		}
 		list[1] = egl_render;
 		render_input_port = EGL_RENDER_INPUT_PORT;
+
+		// set nBufferCountActual to allow binding 2 textures
+		OMX_PARAM_PORTDEFINITIONTYPE portFormat;
+  		OMX_INIT_STRUCTURE(portFormat);
+  		portFormat.nPortIndex = EGL_RENDER_OUT_PORT;
+  		OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+  		portFormat.nBufferCountActual = 2;
+  		OMX_SetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
 	}
 	else
 	{
@@ -676,19 +736,21 @@ static void close_video ()
         fprintf (stderr, "Could not send EOS flag to video decoder\n");
 
 	// wait for EOS from render
+	printf("VID: Waiting for EOS from render\n");
 	if (~flags & RENDER_2_TEXTURE)
 		ilclient_wait_for_event (video_render, OMX_EventBufferFlag, VIDEO_RENDER_INPUT_PORT, 0, OMX_BUFFERFLAG_EOS, 0, ILCLIENT_BUFFER_FLAG_EOS, 10000);
-
 	// need to flush the renderer to allow video_decode to disable its input port
+	printf("VID: Flushing tunnels\n");
 	ilclient_flush_tunnels        (video_tunnel, 0);
+	printf("VID: Disabling port buffers\n");
 	ilclient_disable_port_buffers (video_decode, VIDEO_DECODE_INPUT_PORT, NULL, NULL, NULL);
 	ilclient_disable_tunnel       (video_tunnel);
 	ilclient_disable_tunnel       (video_tunnel + 1);
 	ilclient_disable_tunnel       (video_tunnel + 2);
 	ilclient_teardown_tunnels     (video_tunnel);
-
 	if (video_codec_ctx)
         avcodec_close (video_codec_ctx);
+    fprintf (stderr, "VID: Cleanup completed.\n");
 }
 
 /**
@@ -896,15 +958,19 @@ static void close_audio ()
         fprintf (stderr, "Could not send EOS flag to audio renderer\n");
 
 	// wait for EOS from render
+	printf("AUD: Waiting for EOS from render\n");
 	ilclient_wait_for_event (audio_render, OMX_EventBufferFlag, AUDIO_RENDER_INPUT_PORT, 0, OMX_BUFFERFLAG_EOS, 0, ILCLIENT_BUFFER_FLAG_EOS, 10000);
 	// need to flush the tunnel to allow audio_render to disable its input port
+	printf("AUD: Flushing tunnels\n");
 	ilclient_flush_tunnels        (audio_tunnel, 0);
+	printf("AUD: Disabling port buffers\n");
 	ilclient_disable_port_buffers (audio_render, AUDIO_RENDER_INPUT_PORT, NULL, NULL, NULL);
 	ilclient_disable_tunnel       (audio_tunnel);
 	ilclient_teardown_tunnels     (audio_tunnel);
 
 	if (audio_codec_ctx)
         avcodec_close (audio_codec_ctx);
+    fprintf (stderr, "AUD: Cleanup completed.\n");
 }
 
 
@@ -990,15 +1056,15 @@ static void cleanup ()
 	destroy_packet_buffer (&audio_packet_fifo);
 
 	printf ("  closing streams\n");
-	if (video_stream_idx != AVERROR_STREAM_NOT_FOUND)
-	{
-		close_video ();
-		printf ("    video closed\n");
-	}
 	if (audio_stream_idx != AVERROR_STREAM_NOT_FOUND)
 	{
 		close_audio ();
-		printf ("    audio closed\n");
+		printf ("     audio closed\n");
+	}
+	if (video_stream_idx != AVERROR_STREAM_NOT_FOUND)
+	{
+		close_video ();
+		printf ("     video closed\n");
 	}
 
 	printf ("  freeing ffmpeg structs\n");
@@ -1007,10 +1073,14 @@ static void cleanup ()
 
 	printf ("  cleaning up components\n");
 	ilclient_state_transition   (list, OMX_StateIdle);
+	printf ("  OMX_StateIdle OK\n");
 	ilclient_state_transition   (list, OMX_StateLoaded);
+	printf ("  OMX_StateLoaded OK\n");
 	ilclient_cleanup_components (list);
+	printf ("  ilclient_cleanup_components OK\n");
 
 	flags = 0;
+	printf ("  Cleanup up completed\n");
 }
 
 
@@ -1248,9 +1318,11 @@ end:
 }
 
 
-void rpi_mp_setup_render_buffer (void* _egl_image, pthread_mutex_t** draw_mutex, pthread_cond_t** draw_cond)
+void rpi_mp_setup_render_buffer (void* _egl_image, void* _egl_image2, int* _current_texture, pthread_mutex_t** draw_mutex, pthread_cond_t** draw_cond)
 {
 	egl_image   = _egl_image;
+	egl_image2   = _egl_image2;
+	current_texture = _current_texture;
 	*draw_mutex = &buffer_filled_mut;
 	*draw_cond  = &buffer_filled_cond;
 }

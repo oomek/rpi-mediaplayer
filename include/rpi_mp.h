@@ -40,6 +40,8 @@ int rpi_mp_open (const char* /* file */, int* /* width */, int* /* height */, in
  *  to a mutex and condition for when texture is ready to be rendered to screen.
  */
 void rpi_mp_setup_render_buffer (void*             /* egl_image */,
+								 void*             /* egl_image2 */,
+								 int*             /* current_texture */,
                                  pthread_mutex_t** /* draw_mutex */,
                                  pthread_cond_t**  /* draw_condition */) ;
 

@@ -45,7 +45,8 @@ CFLAGS += -Wall \
           -fPIC \
           -ftree-vectorize \
           -pipe \
-          -Wno-psabi
+          -Wno-psabi \
+          -Wno-deprecated-declarations \
           #-g3
 
 INCLUDES = -I./include \
@@ -64,8 +65,8 @@ LIBS = -lrpi_mp \
        -lilclient \
        -lopenmaxil \
        -lbcm_host \
-       -lGLESv2 \
-       -lEGL \
+       -lbrcmGLESv2 \
+       -lbrcmEGL \
        -lvcos \
        -lvchiq_arm \
        -lpthread \
@@ -86,15 +87,15 @@ bin: $(EXEC)
 
 $(LIB): $(OBJ)
 	@mkdir -p $(@D)
-	$(AR) $(ARARGS) $@ $^
+	@$(AR) $(ARARGS) $@ $^
 
 $(EXEC): lib
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) $(DEFINES) $(INCLUDES) $(LDPATH) -o $@ main.c $(LIBS)
+	@$(CC) $(CFLAGS) $(DEFINES) $(INCLUDES) $(LDPATH) -o $@ main.c $(LIBS)
 
 $(BUILD)/%.o: $(SRCDIR)/%.c
 	@mkdir -p $(@D)
-	$(CC) $(DEFINES) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+	@$(CC) $(DEFINES) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 clean:
-	rm -rf $(BUILD)/*.o $(BIN)/* $(LIB)
+	@rm -rf $(BUILD)/*.o $(BIN)/* $(LIB)
