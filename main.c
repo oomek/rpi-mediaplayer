@@ -1,16 +1,16 @@
 #include "rpi_mp.h"
 #include <stdio.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include "GLES/gl.h"
 #include "EGL/egl.h"
 #include "EGL/eglext.h"
 #include <assert.h>
 #include "bcm_host.h"
 #include <math.h>
+#include "rpi_mp_utils.h"
 
 
-#define IMAGE_SIZE_WIDTH 1920
-#define IMAGE_SIZE_HEIGHT 1080
 #ifndef M_PI
 	#define M_PI 3.141592654
 #endif
@@ -18,9 +18,6 @@
 static int done = 0;
 static pthread_t input_listener;
 static pthread_t egl_draw;
-static GLuint textures[2];
-void * egl_image;
-void * egl_image2;
 static EGLDisplay display;
 static EGLSurface surface;
 static EGLContext context;
@@ -28,14 +25,19 @@ static uint32_t screen_width;
 static uint32_t screen_height;
 static int64_t duration;
 
+static GLuint textures[BUFFER_COUNT];
+void  *egl_images[BUFFER_COUNT];
+static int current_texture = 0;
+
 static pthread_mutex_t* texture_ready_mut;
 static pthread_cond_t* texture_ready_cond;
 
 int image_width, image_height;
 int flags;
 
-static int current_texture = 1;
 char * source;
+
+static int layer = 0;
 
 /** Texture coordinates for the quad. */
 static const GLfloat tex_coords[6 * 4 * 2] = {
@@ -172,9 +174,9 @@ static void* listen_stdin (void* thread_id)
 static void init_textures ()
 {
 	// the textures containing the video frames
-	glGenTextures ( 2, & textures[0] );
+	glGenTextures ( BUFFER_COUNT, &textures[0] );
 
-	for ( int i = 0; i < 2; i++ )
+	for ( int i = 0; i < BUFFER_COUNT; i++ )
 	{
 		glBindTexture ( GL_TEXTURE_2D, textures[i] );
 		glTexImage2D  ( GL_TEXTURE_2D, 0, GL_RGBA, image_width, image_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL );
@@ -183,25 +185,12 @@ static void init_textures ()
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	}
 
-	/* Create EGL Images */
-	egl_image = eglCreateImageKHR ( display,
+		egl_images[i] = eglCreateImageKHR ( display,
 										context,
 										EGL_GL_TEXTURE_2D_KHR,
-										(EGLClientBuffer) textures[0],
+										(EGLClientBuffer) textures[i],
 										0 );
-
-	egl_image2 = eglCreateImageKHR ( display,
-										context,
-										EGL_GL_TEXTURE_2D_KHR,
-										(EGLClientBuffer) textures[1],
-										0 );
-
-	if ( egl_image == EGL_NO_IMAGE_KHR )
-	{
-		fprintf ( stderr, "eglCreateImageKHR failed.\n" );
-		exit(1);
 	}
 
 	// setup overall texture environment
@@ -288,8 +277,9 @@ static void init_ogl ()
 	dispman_display = vc_dispmanx_display_open( 0 /* LCD */);
 	dispman_update = vc_dispmanx_update_start( 0 );
 
+	printf("dispmanx layer: %d\n", layer);
 	dispman_element = vc_dispmanx_element_add ( dispman_update, dispman_display,
-		0/*layer*/, &dst_rect, 0/*src*/,
+		layer/*layer*/, &dst_rect, 0/*src*/,
 		&src_rect, DISPMANX_PROTECTION_NONE, 0 /*alpha*/, 0/*clamp*/, 0/*transform*/);
 
 	nativewindow.element = dispman_element;
@@ -329,11 +319,14 @@ static void init_ogl ()
 
 static void destroy_function ()
 {
-	if (egl_image != 0)
+	if (egl_images[0] != 0)
 	{
 		printf ("EGL destroy\n");
-		if (!eglDestroyImageKHR (display, (EGLImageKHR) egl_image))
-			fprintf (stderr, "eglDestroyImageKHR failed.");
+		for ( int i = 0; i < BUFFER_COUNT; i++)
+		{
+			if (!eglDestroyImageKHR (display, (EGLImageKHR) egl_images[i]))
+				fprintf (stderr, "eglDestroyImageKHR failed.");
+		}
 		// clear screen
 		glClear           (GL_COLOR_BUFFER_BIT);
 		eglSwapBuffers    (display, surface);
@@ -348,12 +341,18 @@ static void destroy_function ()
 
 // animating zoom level to make tearing visible by uncoupling video decoder and opengl renderer
 float zoom = -34.f;
+int busy_wait = 0;
 
 static void draw ()
 {
-	glBindTexture ( GL_TEXTURE_2D, textures[current_texture] );
-	glMatrixMode   (GL_MODELVIEW);
+	// simulating the CPU load
+	busy_wait += 50;
+	if (busy_wait > 10000) busy_wait = 0;
+	usleep(busy_wait);
+
 	glClear        (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glBindTexture ( GL_TEXTURE_2D, textures[(current_texture + 1) % BUFFER_COUNT] );
+	glMatrixMode   (GL_MODELVIEW);
 	glLoadIdentity ();
 	glTranslatef   (0.f, 0.f, zoom);
 	zoom -= 0.005;
@@ -388,6 +387,8 @@ static int check_arguments (int argc, char** argv)
 			flags |= RENDER_VIDEO_TO_TEXTURE;
 		else if (strcmp (argv[i], "analog-audio") == 0)
 			flags |= ANALOG_AUDIO;
+		else if (strcmp (argv[i], "layer") == 0)
+			layer = atoi(argv[i+1]);
 	}
 	return 0;
 }
@@ -414,7 +415,7 @@ int main (int argc, char** argv)
 	{
 		init_ogl();
 		init_textures();
-		rpi_mp_setup_render_buffer (egl_image, egl_image2, &current_texture, &texture_ready_mut, &texture_ready_cond);
+		rpi_mp_setup_render_buffer (egl_images, &current_texture, &texture_ready_mut, &texture_ready_cond);
 	}
 
 	pthread_create (&egl_draw,       NULL, &play_video,   NULL);

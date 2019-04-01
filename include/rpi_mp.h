@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <pthread.h>
 
+#define BUFFER_COUNT 3
+
 /*  FLAGS */
 enum _flags
 {
@@ -39,11 +41,10 @@ int rpi_mp_open (const char* /* file */, int* /* width */, int* /* height */, in
  *  Input parameters are a pointer to the EGL Render Buffer and pointers that are set
  *  to a mutex and condition for when texture is ready to be rendered to screen.
  */
-void rpi_mp_setup_render_buffer (void*             /* egl_image */,
-								 void*             /* egl_image2 */,
-								 int*             /* current_texture */,
-                                 pthread_mutex_t** /* draw_mutex */,
-                                 pthread_cond_t**  /* draw_condition */) ;
+void rpi_mp_setup_render_buffer (void* []			/* egl_images */,
+								 int*				/* current_texture */,
+	                                 pthread_mutex_t**	/* draw_mutex */,
+                                 pthread_cond_t**	/* draw_condition */) ;
 
 /**
  *	Starts media playback. Takes a pointer to an EGLImage object for rendering to a texture.

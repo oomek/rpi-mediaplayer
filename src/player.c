@@ -92,12 +92,9 @@ static ILCLIENT_T           * client;
 
 static OMX_BUFFERHEADERTYPE * omx_video_buffer,
                             * omx_audio_buffer,
-                            * omx_egl_buffer,
-                            * omx_egl_buffer2,
-                            * omx_egl_buffer_tmp;
+                            * omx_egl_buffers[BUFFER_COUNT];
 
-static void                 * egl_image = NULL;
-static void                 * egl_image2 = NULL;
+static void                 * egl_images[BUFFER_COUNT];
 static int                  * current_texture = NULL;
 static int32_t                flags     =  0;
 
@@ -156,6 +153,20 @@ static inline void unlock ()
 	pthread_mutex_unlock (&audio_mutex);
 }
 
+static void vsync_offset( int offs ) // not used at the moment
+{
+	OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp_offset;
+	OMX_INIT_STRUCTURE(timestamp_offset);
+	timestamp_offset.nPortIndex = VIDEO_SCHEDULER_CLOCK_PORT;
+	timestamp_offset.nTimestamp = pts__omx_timestamp (offs);
+
+	if(OMX_SetConfig(ILC_GET_HANDLE (video_scheduler), OMX_IndexConfigPresentationOffset, &timestamp_offset) != OMX_ErrorNone)
+	{
+		printf("failed to set vsync offset\n");
+	}
+}
+
+
 /**
  *  Fill the EGL render buffer with decoded raw image data.
  *  Should only be called as callback for the fillbuffer event when video decoding
@@ -165,14 +176,13 @@ static void fill_egl_texture_buffer (void* data, COMPONENT_T* c)
 {
 	if (~flags & STOPPED)
 	{
-		*current_texture = 1 - *current_texture;
-		omx_egl_buffer_tmp = omx_egl_buffer;
-		omx_egl_buffer = omx_egl_buffer2;
-		omx_egl_buffer2 = omx_egl_buffer_tmp;
-		int err = OMX_FillThisBuffer (ilclient_get_handle (egl_render), omx_egl_buffer);
+		// ts(); //start the timer
+		int err = OMX_FillThisBuffer (ILC_GET_HANDLE (egl_render), omx_egl_buffers[*current_texture]);
 		if ( err != OMX_ErrorNone )
 			fprintf (stderr, "OMX_FillThisBuffer failed for egl buffer in callback\n");
+		// tp(); // print the time spent on filling the buffer
 
+		*current_texture = (*current_texture + 1) % BUFFER_COUNT;
 	}
 }
 
@@ -185,13 +195,8 @@ static inline int decode_video_packet ()
 	int packet_size = 0;
 	OMX_TICKS ticks = omx_timestamp (video_packet);
 
-	// packet data can be larger than decoder buffer
 	while (video_packet.size > 0)
 	{
-		// printf( "high: %d low : %d\n", ticks.nHighPart, ticks.nLowPart );
-		// fix for uneven framerate. not an elegant solution, needs investigating
-		// ticks.nLowPart += 16666 * 1.5;
-		// ticks.nLowPart += 1000;
 		// feed data to video decoder
 		if ((omx_video_buffer = ilclient_get_input_buffer (video_decode, VIDEO_DECODE_INPUT_PORT, 1)) == NULL)
 		{
@@ -250,16 +255,13 @@ static inline int decode_video_packet ()
 					fprintf (stderr, "OMX_CommandPortEnable failed.\n");
 					return 1;
 				}
-				if (OMX_UseEGLImage (ILC_GET_HANDLE (egl_render), &omx_egl_buffer, EGL_RENDER_OUT_PORT, NULL, egl_image) != OMX_ErrorNone)
+				for ( int i = 0; i < BUFFER_COUNT; i++)
 				{
-					fprintf (stderr, "OMX_UseEGLImage failed.\n");
-					return 1;
-				}
-
-				if (OMX_UseEGLImage (ILC_GET_HANDLE (egl_render), &omx_egl_buffer2, EGL_RENDER_OUT_PORT, NULL, egl_image2) != OMX_ErrorNone)
-				{
-					fprintf (stderr, "OMX_UseEGLImage failed.\n");
-					return 1;
+					if (OMX_UseEGLImage (ILC_GET_HANDLE (egl_render), &omx_egl_buffers[i], EGL_RENDER_OUT_PORT, NULL, egl_images[i]) != OMX_ErrorNone)
+					{
+						fprintf (stderr, "OMX_UseEGLImage failed.\n");
+						return 1;
+					}
 				}
 
 				OMX_PARAM_PORTDEFINITIONTYPE portFormat;
@@ -275,11 +277,12 @@ static inline int decode_video_packet ()
 				// Set egl_render to executing
 				ilclient_change_component_state (egl_render, OMX_StateExecuting);
 				// Request egl_render to write data to the texture buffer
-				if (OMX_FillThisBuffer (ILC_GET_HANDLE (egl_render), omx_egl_buffer) != OMX_ErrorNone)
+				if (OMX_FillThisBuffer (ILC_GET_HANDLE (egl_render), omx_egl_buffers[*current_texture]) != OMX_ErrorNone)
 				{
 					fprintf (stderr, "OMX_FillThisBuffer failed for egl buffer.\n");
 					return 1;
 				}
+				*current_texture = (*current_texture + 1) % BUFFER_COUNT;
 			}
 			// if we are not rendering to texture we just need to change the video renderer to excecuting
 			else
@@ -620,7 +623,7 @@ static int open_video ()
   		OMX_INIT_STRUCTURE(portFormat);
   		portFormat.nPortIndex = EGL_RENDER_OUT_PORT;
   		OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
-  		portFormat.nBufferCountActual = 2;
+  		portFormat.nBufferCountActual = BUFFER_COUNT;
   		OMX_SetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
 	}
 	else
@@ -1074,8 +1077,8 @@ static void cleanup ()
 	printf ("  cleaning up components\n");
 	ilclient_state_transition   (list, OMX_StateIdle);
 	printf ("  OMX_StateIdle OK\n");
-	ilclient_state_transition   (list, OMX_StateLoaded);
-	printf ("  OMX_StateLoaded OK\n");
+	// ilclient_state_transition   (list, OMX_StateLoaded);
+	// printf ("  OMX_StateLoaded OK\n");
 	ilclient_cleanup_components (list);
 	printf ("  ilclient_cleanup_components OK\n");
 
@@ -1318,10 +1321,11 @@ end:
 }
 
 
-void rpi_mp_setup_render_buffer (void* _egl_image, void* _egl_image2, int* _current_texture, pthread_mutex_t** draw_mutex, pthread_cond_t** draw_cond)
+void rpi_mp_setup_render_buffer (void *_egl_images[], int *_current_texture, pthread_mutex_t** draw_mutex, pthread_cond_t** draw_cond)
 {
-	egl_image   = _egl_image;
-	egl_image2   = _egl_image2;
+	for ( int i = 0; i < BUFFER_COUNT; i++)
+		egl_images[i] = _egl_images[i];
+
 	current_texture = _current_texture;
 	*draw_mutex = &buffer_filled_mut;
 	*draw_cond  = &buffer_filled_cond;
