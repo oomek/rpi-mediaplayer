@@ -47,6 +47,7 @@ enum flags
 	VIDEO_STOPPED         = 0x0400,
 	AUDIO_STOPPED         = 0x0800,
 	ANALOG_AUDIO_OUT      = 0x1000,
+	NO_AUDIO_STREAM       = 0x2000,
 };
 
 #define OUT_CHANNELS(num_channels) ((num_channels) > 4 ? 8 : (num_channels) > 2 ? 4 : (num_channels))
@@ -496,7 +497,7 @@ static void audio_decoding_thread ()
 	// AVPacket tmp_pack;
 	uint8_t *d;
 	int ret;
-	while (~flags & STOPPED)
+	while (~flags & STOPPED && ~flags & NO_AUDIO_STREAM)
 	{
 		// check if we are done demuxing
 		if (flags & DONE_READING && !audio_packet_fifo.n_packets)
@@ -1278,6 +1279,9 @@ int rpi_mp_open (const char* source, int* image_width, int* image_height, int64_
 			audio_codec_ctx = audio_stream->codec;
 			open_audio ();
 		}
+		else
+			SET_FLAG(NO_AUDIO_STREAM);
+
 		// check that we did get streams
 		if (video_stream_idx == AVERROR_STREAM_NOT_FOUND && audio_stream_idx == AVERROR_STREAM_NOT_FOUND)
 		{
