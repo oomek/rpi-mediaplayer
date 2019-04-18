@@ -3,9 +3,11 @@
  * Description: Public interface to mediaplayer.
  * ----------------------------------------------------------------------------------- */
 #include <stdint.h>
+#include <stdbool.h>
 #include <pthread.h>
 
-#define BUFFER_COUNT 3
+
+#define BUFFER_COUNT 2
 
 /*  FLAGS */
 enum _flags
@@ -43,7 +45,7 @@ int rpi_mp_open (const char* /* file */, int* /* width */, int* /* height */, in
  */
 void rpi_mp_setup_render_buffer (void* []			/* egl_images */,
 								 int*				/* current_texture */,
-	                                 pthread_mutex_t**	/* draw_mutex */,
+	                             pthread_mutex_t**	/* draw_mutex */,
                                  pthread_cond_t**	/* draw_condition */) ;
 
 /**
@@ -78,3 +80,5 @@ int	rpi_mp_seek (int64_t /* position */) ;
  *  Returns non-zero if there is none.
  */
 int rpi_mp_metadata (const char* /* key */, char** /* title */) ;
+
+void tick ();

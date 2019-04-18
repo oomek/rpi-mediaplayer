@@ -27,7 +27,7 @@ static int64_t duration;
 
 static GLuint textures[BUFFER_COUNT];
 void  *egl_images[BUFFER_COUNT];
-static int current_texture = 0;
+static int current_texture = 1;
 
 static pthread_mutex_t* texture_ready_mut;
 static pthread_cond_t* texture_ready_cond;
@@ -39,77 +39,26 @@ char * source;
 
 static int layer = 0;
 
-/** Texture coordinates for the quad. */
-static const GLfloat tex_coords[6 * 4 * 2] = {
+static const GLfloat quad_uv[4 * 2] = {
 	0.f,  1.f,
 	1.f,  1.f,
 	0.f,  0.f,
 	1.f,  0.f,
-
-	0.f,  0.f,
-	1.f,  0.f,
-	0.f,  1.f,
-	1.f,  1.f,
-
-	0.f,  0.f,
-	1.f,  0.f,
-	0.f,  1.f,
-	1.f,  1.f,
-
-	0.f,  0.f,
-	1.f,  0.f,
-	0.f,  1.f,
-	1.f,  1.f,
-
-	0.f,  0.f,
-	1.f,  0.f,
-	0.f,  1.f,
-	1.f,  1.f,
-
-	0.f,  0.f,
-	1.f,  0.f,
-	0.f,  1.f,
-	1.f,  1.f,
 };
 
-static const GLbyte quadx[6*4*3] = {
-	/* FRONT */
-	-15, -10,  10,
-	15, -10,  10,
-	-15,  10,  10,
-	15,  10,  10,
-
-	/* BACK */
-	-10, -10, -10,
-	-10,  10, -10,
-	10, -10, -10,
-	10,  10, -10,
-
-	/* LEFT */
-	-10, -10,  10,
-	-10,  10,  10,
-	-10, -10, -10,
-	-10,  10, -10,
-
-	/* RIGHT */
-	10, -10, -10,
-	10,  10, -10,
-	10, -10,  10,
-	10,  10,  10,
-
-	/* TOP */
-	-10,  10,  10,
-	10,  10,  10,
-	-10,  10, -10,
-	10,  10, -10,
-
-	/* BOTTOM */
-	-10, -10,  10,
-	-10, -10, -10,
-	10, -10,  10,
-	10, -10, -10,
+static const GLbyte quad_vertex[4 * 3] = {
+	0.f, 0.f, 0.f,
+	1.f, 0.f, 0.f,
+	0.f, 1.f, 0.f,
+	1.f, 1.f, 0.f,
 };
 
+static const GLfloat quad_colors[4 * 4] = {
+	0.5f, 1.f, 0.5f, 1.f,
+	0.5f, 1.f, 0.5f, 1.f,
+	0.5f, 1.f, 0.5f, 1.f,
+	0.5f, 1.f, 0.5f, 1.f,
+};
 
 static void* listen_stdin (void* thread_id)
 {
@@ -142,6 +91,10 @@ static void* listen_stdin (void* thread_id)
 
 				case 'p':
 					rpi_mp_seek (rpi_mp_current_time() - 60);
+					break;
+
+				case 'r':
+					rpi_mp_seek (0);
 					break;
 
 				case 't':
@@ -179,12 +132,13 @@ static void init_textures ()
 	for ( int i = 0; i < BUFFER_COUNT; i++ )
 	{
 		glBindTexture ( GL_TEXTURE_2D, textures[i] );
-		glTexImage2D  ( GL_TEXTURE_2D, 0, GL_RGBA, image_width, image_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL );
 
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+		glTexImage2D  ( GL_TEXTURE_2D, 0, GL_RGBA, image_width, image_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL );
 
 		egl_images[i] = eglCreateImageKHR ( display,
 										context,
@@ -194,15 +148,15 @@ static void init_textures ()
 	}
 
 	// setup overall texture environment
-	glTexCoordPointer(2, GL_FLOAT, 0, tex_coords);
+	glTexCoordPointer(2, GL_FLOAT, 0, quad_uv);
 	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 
 	glEnable(GL_TEXTURE_2D);
 
 	// Bind texture surface to current vertices
-	glBindTexture(GL_TEXTURE_2D, textures[current_texture]);
+	// glBindTexture(GL_TEXTURE_2D, textures[(current_texture + 1) % BUFFER_COUNT]);
 }
-
+	DISPMANX_UPDATE_HANDLE_T dispman_update;
 
 /***********************************************************
  * Name: init_ogl
@@ -225,7 +179,7 @@ static void init_ogl ()
 
 	DISPMANX_ELEMENT_HANDLE_T dispman_element;
 	DISPMANX_DISPLAY_HANDLE_T dispman_display;
-	DISPMANX_UPDATE_HANDLE_T dispman_update;
+
 	VC_RECT_T dst_rect;
 	VC_RECT_T src_rect;
 
@@ -264,6 +218,8 @@ static void init_ogl ()
 	success = graphics_get_display_size(0 /* LCD */, & screen_width, & screen_height);
 	assert( success >= 0 );
 
+	int div = 1;
+
 	dst_rect.x = 0;
 	dst_rect.y = 0;
 	dst_rect.width = screen_width;
@@ -271,8 +227,8 @@ static void init_ogl ()
 
 	src_rect.x = 0;
 	src_rect.y = 0;
-	src_rect.width = screen_width << 16;
-	src_rect.height = screen_height << 16;
+	src_rect.width = (screen_width / div) << 16;
+	src_rect.height = (screen_height / div) << 16;
 
 	dispman_display = vc_dispmanx_display_open( 0 /* LCD */);
 	dispman_update = vc_dispmanx_update_start( 0 );
@@ -283,8 +239,8 @@ static void init_ogl ()
 		&src_rect, DISPMANX_PROTECTION_NONE, 0 /*alpha*/, 0/*clamp*/, 0/*transform*/);
 
 	nativewindow.element = dispman_element;
-	nativewindow.width = screen_width;
-	nativewindow.height = screen_height;
+	nativewindow.width = screen_width / div;
+	nativewindow.height = screen_height / div;
 	vc_dispmanx_update_submit_sync( dispman_update );
 
 	surface = eglCreateWindowSurface( display, config, &nativewindow, NULL );
@@ -301,19 +257,26 @@ static void init_ogl ()
 	//glEnable (GL_CULL_FACE);
 
 
-	float nearp = 1.0f;
-	float farp = 500.0f;
-	float hht = nearp * (float)tan(45.0 / 2.0 / 180.0 * M_PI);
-	float hwd = hht * (float) screen_width / (float) screen_height;
+	// float nearp = 1.0f;
+	// float farp = 500.0f;
+	// float hht = nearp * (float)tan(45.0 / 2.0 / 180.0 * M_PI);
+	// float hwd = hht * (float) screen_width / (float) screen_height;
 
-	glViewport(0, 0, (GLsizei) screen_width, (GLsizei) screen_height);
+	glViewport(0, 0, (GLsizei) screen_width / div, (GLsizei) screen_height / div);
 	glMatrixMode(GL_PROJECTION);
 	glLoadIdentity();
 
-	glFrustumf(-hwd, hwd, -hht, hht, nearp, farp);
+	// glFrustumf(-hwd, hwd, -hht, hht, nearp, farp);
+	glOrthof(0, 1, 0, 1, - 1, 1);
 
+	// glMatrixMode(GL_MODELVIEW);
+	// glLoadIdentity();
+
+	glVertexPointer( 3, GL_BYTE, 0, quad_vertex );
 	glEnableClientState( GL_VERTEX_ARRAY );
-	glVertexPointer( 3, GL_BYTE, 0, quadx );
+
+	glColorPointer( 4, GL_FLOAT, 0, quad_colors );
+	glEnableClientState( GL_COLOR_ARRAY );
 }
 
 
@@ -339,26 +302,64 @@ static void destroy_function ()
 	rpi_mp_deinit ();
 }
 
-// animating zoom level to make tearing visible by uncoupling video decoder and opengl renderer
-float zoom = -34.f;
+
+// number of videos = xn * yn
+int columns = 1;
+int rows = 1;
+
 int busy_wait = 0;
+float bar_x = 0;
 
 static void draw ()
 {
+	// ts();
 	// simulating the CPU load
-	busy_wait += 50;
-	if (busy_wait > 10000) busy_wait = 0;
+	busy_wait += 100;
+	if (busy_wait > 500) busy_wait = 100;
 	usleep(busy_wait);
+	// printf("WAIT: %d\n", busy_wait);
+
+	glDisableClientState( GL_COLOR_ARRAY );
 
 	glClear        (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	glBindTexture ( GL_TEXTURE_2D, textures[(current_texture + 1) % BUFFER_COUNT] );
+
 	glMatrixMode   (GL_MODELVIEW);
-	glLoadIdentity ();
-	glTranslatef   (0.f, 0.f, zoom);
-	zoom -= 0.005;
-	glDrawArrays   (GL_TRIANGLE_STRIP, 0, 4);
+
+
+
+	// video tiles
+	pthread_mutex_lock (texture_ready_mut);
+	glBindTexture ( GL_TEXTURE_2D, textures[current_texture] );
+    pthread_mutex_unlock (texture_ready_mut);
+
+	for ( int j = 0; j < columns; j++)
+	{
+		for ( int i = 0; i < rows; i++)
+		{
+			glLoadIdentity ();
+			glTranslatef   (j / (float)columns, i / (float)rows, 0.0);
+			glScalef   (1.0 / columns, 1.0 / rows, 0.0);
+			glDrawArrays   (GL_TRIANGLE_STRIP, 0, 4);
+		}
+	}
+	glBindTexture( GL_TEXTURE_2D, 0 );
+
+
+
+	// moving bar
+	// bar_x += 4.0 / (float)screen_width;
+	// if (bar_x > 1.0 - (32.0 / (float)screen_width)) bar_x = 0.0;
+
+	// glEnableClientState( GL_COLOR_ARRAY );
+	// glLoadIdentity ();
+	// glTranslatef   (bar_x, 0.0, 0.0);
+	// glScalef   (32.0 / (float)screen_width, 1.0, 0.0);
+	// glDrawArrays   (GL_TRIANGLE_STRIP, 0, 4);
+
+
 
 	eglSwapBuffers (display, surface);
+	tick();
 }
 
 
@@ -403,7 +404,6 @@ int main (int argc, char** argv)
 		return 1;
 	bcm_host_init ();
 
-
 	if (rpi_mp_init () || rpi_mp_open (argv[argc - 1],
 		&image_width,
 		&image_height,
@@ -421,6 +421,7 @@ int main (int argc, char** argv)
 	pthread_create (&egl_draw,       NULL, &play_video,   NULL);
 	pthread_create (&input_listener, NULL, &listen_stdin, NULL);
 
+    ts();
 	if (flags & RENDER_VIDEO_TO_TEXTURE)
 		while (!done)
 			draw ();

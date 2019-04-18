@@ -41,7 +41,8 @@ DEFINES = -DSTANDALONE \
           -DUSE_VCHIQ_ARM
 
 CFLAGS += -Wall \
-          -O3 \
+          -Winline \
+          -O1 \
           -fPIC \
           -ftree-vectorize \
           -pipe \
@@ -50,6 +51,7 @@ CFLAGS += -Wall \
           #-g3
 
 INCLUDES = -I./include \
+           -I/usr/local/include \
            -I$(VC)/include \
            -I$(VC)/include/interface/vcos/pthreads \
            -I$(VC)/include/interface/vmcs_host/linux \
@@ -57,6 +59,7 @@ INCLUDES = -I./include \
            -I$(VC)/src/hello_pi/libs/vgfont
 
 LDPATH += -L./lib \
+          -L/usr/local/lib \
           -L$(VC)/src/hello_pi/libs/ilclient \
           -L$(VC)/lib \
           -L$(VC)/src/hello_pi/libs/vgfont

@@ -1,7 +1,9 @@
 // ffmpeg
-#include <libavformat/avformat.h>
-#include <libavutil/avutil.h>
 #include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavformat/avio.h>
+#include <libavutil/avutil.h>
+
 #include <libavutil/samplefmt.h>
 #include "bcm_host.h"
 #include "ilclient.h"
@@ -28,7 +30,7 @@ enum omxports
 	AUDIO_RENDER_INPUT_PORT     = 100,
 	AUDIO_RENDER_CLOCK_PORT     = 101,
 	CLOCK_VIDEO_PORT            =  80,
-	CLOCK_AUDIO_PORT            =  81
+	CLOCK_AUDIO_PORT            =  80
 };
 
 /* FLAGS ----------------------------------- */
@@ -42,27 +44,29 @@ enum flags
 	HARDWARE_DECODE_AUDIO = 0x0020,
 	DONE_READING          = 0x0040,
 	RENDER_2_TEXTURE      = 0x0080,
-	VIDEO_PAUSED          = 0x0100,
-	AUDIO_PAUSED          = 0x0200,
-	VIDEO_STOPPED         = 0x0400,
-	AUDIO_STOPPED         = 0x0800,
-	ANALOG_AUDIO_OUT      = 0x1000,
-	NO_AUDIO_STREAM       = 0x2000,
+	VIDEO_STOPPED         = 0x0100,
+	AUDIO_STOPPED         = 0x0200,
+	ANALOG_AUDIO_OUT      = 0x0400,
+	NO_AUDIO_STREAM       = 0x0800,
+	LAST_BUFFER           = 0x1000,
+	LAST_FRAME            = 0x2000,
+	CLOCK_PAUSED          = 0x4000,
 };
 
 #define OUT_CHANNELS(num_channels) ((num_channels) > 4 ? 8 : (num_channels) > 2 ? 4 : (num_channels))
 #define WAIT_WHILE_PAUSED { pthread_mutex_lock (&pause_mutex); ret = pthread_cond_wait (&pause_condition, &pause_mutex); pthread_mutex_unlock (&pause_mutex); }
+// #define WAIT_WHILE_PAUSED {}
 #define SET_FLAG(flag) { pthread_mutex_lock (&flags_mutex); flags |= flag; pthread_mutex_unlock (&flags_mutex); }
 #define UNSET_FLAG(flag) { pthread_mutex_lock (&flags_mutex); flags &= ~flag; pthread_mutex_unlock (&flags_mutex); }
 #define OMX_INIT_PARAM(type) memset (&type, 0x0, sizeof (type)); type.nSize = sizeof (type); type.nVersion.nVersion = OMX_VERSION;
 #define OMX_INIT_STRUCTURE(a) \
     memset(&(a), 0, sizeof(a)); \
     (a).nSize = sizeof(a); \
-    (a).nVersion.nVersion = OMX_VERSION; \
-    (a).nVersion.s.nVersionMajor = OMX_VERSION_MAJOR; \
-    (a).nVersion.s.nVersionMinor = OMX_VERSION_MINOR; \
-    (a).nVersion.s.nRevision = OMX_VERSION_REVISION; \
-    (a).nVersion.s.nStep = OMX_VERSION_STEP
+    (a).nVersion.nVersion = OMX_VERSION
+    // (a).nVersion.s.nVersionMajor = OMX_VERSION_MAJOR;
+    // (a).nVersion.s.nVersionMinor = OMX_VERSION_MINOR;
+    // (a).nVersion.s.nRevision = OMX_VERSION_REVISION;
+    // (a).nVersion.s.nStep = OMX_VERSION_STEP
 
 // Demuxing variables (ffmpeg)
 static AVFormatContext      * fmt_ctx          = NULL;
@@ -82,13 +86,14 @@ static COMPONENT_T          * video_decode    = NULL,
                             * video_scheduler = NULL,
                             * video_render    = NULL,
                             * video_clock     = NULL,
+                            * audio_clock     = NULL,
                             * audio_decode    = NULL,
                             * audio_render    = NULL,
                             * egl_render      = NULL;
 
 static TUNNEL_T               video_tunnel[4];
 static TUNNEL_T               audio_tunnel[3];
-static COMPONENT_T          * list[7];
+static COMPONENT_T          * list[8];
 static ILCLIENT_T           * client;
 
 static OMX_BUFFERHEADERTYPE * omx_video_buffer,
@@ -98,6 +103,10 @@ static OMX_BUFFERHEADERTYPE * omx_video_buffer,
 static void                 * egl_images[BUFFER_COUNT];
 static int                  * current_texture = NULL;
 static int32_t                flags     =  0;
+static unsigned int           refresh_rate = 0;
+// static int                    repeat_count = 0;
+static int                    video_duration = 0;
+static int                    audio_duration = 0;
 
 // Helpers
 static packet_buffer video_packet_fifo, audio_packet_fifo;
@@ -115,25 +124,64 @@ static pthread_cond_t  buffer_filled_cond = PTHREAD_COND_INITIALIZER;
 /**
  *  Convert PTS (from libFFmpeg) to OMX_TICKS struct.
  */
-static inline OMX_TICKS pts__omx_timestamp (double pts)
+static inline OMX_TICKS pts__omx_timestamp (int64_t pts)
 {
 	OMX_TICKS ticks;
-	ticks.nLowPart 	= (int64_t) pts;
-	ticks.nHighPart = (int64_t) pts >> 32;
+	ticks.nLowPart 	= pts;
+	ticks.nHighPart = pts >> 32;
 	return ticks;
 }
+
 
 /**
  *	Converts AVPacket timestamp to an OMX_TICKS timestamp
  */
 static inline OMX_TICKS omx_timestamp (AVPacket p)
 {
-	uint64_t pts = p.pts != AV_NOPTS_VALUE ? p.pts : p.dts != AV_NOPTS_VALUE ? p.dts : 0;
+	int64_t pts = p.pts != AV_NOPTS_VALUE ? p.pts : p.dts != AV_NOPTS_VALUE ? p.dts : 0;
 	int      num = fmt_ctx->streams[p.stream_index]->time_base.num;
 	int      den = fmt_ctx->streams[p.stream_index]->time_base.den;
 
-	double timestamp = (double) pts * num / den * AV_TIME_BASE;
+	int64_t timestamp = ( pts * num * AV_TIME_BASE ) / den;
 	return pts__omx_timestamp (timestamp);
+}
+
+/**
+ *	Converts AVPacket timestamp to int64_t
+ */
+static inline int64_t int64_timestamp (AVPacket p)
+{
+	int64_t pts = p.pts != AV_NOPTS_VALUE ? p.pts : p.dts != AV_NOPTS_VALUE ? p.dts : 0;
+	int64_t      num = fmt_ctx->streams[p.stream_index]->time_base.num;
+	int64_t      den = fmt_ctx->streams[p.stream_index]->time_base.den;
+
+	return ( pts * num * AV_TIME_BASE ) / den;
+}
+
+static int64_t prev_pts;
+static int64_t prev_duration;
+
+static inline int64_t int64_timestamp_fix (AVPacket p)
+{
+	// int64_t pts = p.pts != AV_NOPTS_VALUE ? p.pts : p.dts != AV_NOPTS_VALUE ? p.dts : 0;
+
+	int64_t pts = p.pts;
+
+	if ( pts == AV_NOPTS_VALUE )
+		pts = p.dts;
+
+	// Correct for out of bounds pts
+	if ( pts < prev_pts )
+		pts = prev_pts + prev_duration;
+
+	// Track pts and duration if we need to correct next frame
+	prev_pts = pts;
+	prev_duration = p.duration;
+
+	int64_t      num = fmt_ctx->streams[p.stream_index]->time_base.num;
+	int64_t      den = fmt_ctx->streams[p.stream_index]->time_base.den;
+
+	return ( pts * num * AV_TIME_BASE ) / den;
 }
 
 /**
@@ -154,17 +202,52 @@ static inline void unlock ()
 	pthread_mutex_unlock (&audio_mutex);
 }
 
-static void vsync_offset( int offs ) // not used at the moment
-{
-	OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp_offset;
-	OMX_INIT_STRUCTURE(timestamp_offset);
-	timestamp_offset.nPortIndex = VIDEO_SCHEDULER_CLOCK_PORT;
-	timestamp_offset.nTimestamp = pts__omx_timestamp (offs);
+// static void vsync_offset( int offs ) // not used at the moment
+// {
+// 	OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp_offset;
+// 	OMX_INIT_STRUCTURE(timestamp_offset);
+// 	timestamp_offset.nPortIndex = VIDEO_SCHEDULER_CLOCK_PORT;
+// 	timestamp_offset.nTimestamp = pts__omx_timestamp (offs);
 
-	if(OMX_SetConfig(ILC_GET_HANDLE (video_scheduler), OMX_IndexConfigPresentationOffset, &timestamp_offset) != OMX_ErrorNone)
+// 	if(OMX_SetConfig(ILC_GET_HANDLE (video_scheduler), OMX_IndexConfigPresentationOffset, &timestamp_offset) != OMX_ErrorNone)
+// 	{
+// 		printf("failed to set vsync offset\n");
+// 	}
+// }
+
+
+
+static int setup_clock ()
+{
+	int ret = 0;
+	// set clock configuration
+	OMX_TIME_CONFIG_CLOCKSTATETYPE clock_state;
+	OMX_INIT_STRUCTURE(clock_state);
+	clock_state.eState            = OMX_TIME_ClockStateWaitingForStartTime;
+	clock_state.nWaitMask         = 0;
+	clock_state.nOffset			  = pts__omx_timestamp (-1000LL * 1000);
+
+	if (video_stream_idx != AVERROR_STREAM_NOT_FOUND)
+		clock_state.nWaitMask = OMX_CLOCKPORT0;
+	if (audio_stream_idx != AVERROR_STREAM_NOT_FOUND)
+		clock_state.nWaitMask |= OMX_CLOCKPORT1;
+
+	if (video_clock != NULL && OMX_SetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeClockState, &clock_state) != OMX_ErrorNone)
 	{
-		printf("failed to set vsync offset\n");
+		fprintf (stderr, "Error settings parameters for video clock\n");
+		ret = -13;
 	}
+
+	// if (audio_stream_idx != AVERROR_STREAM_NOT_FOUND)
+	// 	clock_state.nWaitMask = OMX_CLOCKPORT0;
+
+	// clock_state.nOffset			  = pts__omx_timestamp (-1000LL * 1000);
+	// if (audio_clock != NULL && OMX_SetParameter (ILC_GET_HANDLE (audio_clock), OMX_IndexConfigTimeClockState, &clock_state) != OMX_ErrorNone)
+	// {
+	// 	fprintf (stderr, "Error settings parameters for video clock\n");
+	// 	ret = -13;
+	// }
+	return ret;
 }
 
 
@@ -173,18 +256,123 @@ static void vsync_offset( int offs ) // not used at the moment
  *  Should only be called as callback for the fillbuffer event when video decoding
  *  of a frame is finished.
  */
+// static int vsync_triggered = 0;
+static int current_buffer = 0;
+static unsigned long timer = 0;
+static int delta_time = 0;
+
+void printState(OMX_HANDLETYPE handle)
+{
+	OMX_STATETYPE state;
+	OMX_ERRORTYPE err;
+	err = OMX_GetState(handle, &state);
+	if (err != OMX_ErrorNone)
+	{
+		fprintf(stderr, "Error on getting state\n");
+		exit(1);
+	}
+	switch (state)
+	{
+		case OMX_StateLoaded: printf("StateLoaded\n"); break;
+		case OMX_StateIdle: printf("StateIdle\n"); break;
+		case OMX_StateExecuting: printf("StateExecuting\n"); break;
+		case OMX_StatePause: printf("StatePause\n"); break;
+		case OMX_StateWaitForResources: printf("StateWait\n"); break;
+		case OMX_StateInvalid: printf("StateInvalid\n"); break;
+		default: printf("State unknown\n"); break;
+	}
+}
+
 static void fill_egl_texture_buffer (void* data, COMPONENT_T* c)
 {
-	if (~flags & STOPPED)
+	// OMX_BUFFERHEADERTYPE *buffer = data;
+	// printf("CALLBACK: %p\n", c);
+	printf("CALLBACK: %i %i\n", omx_egl_buffers[current_buffer]->nFlags, omx_egl_buffers[current_buffer]->nTimeStamp.nLowPart);
+
+	// int last_frame = omx_egl_buffers[current_buffer]->nTimeStamp.nLowPart == pts__omx_timestamp( video_duration ).nLowPart ? 1 : 0 ;
+	// int last_frame = omx_egl_buffers[current_buffer]->n == pts__omx_timestamp( video_duration ).nLowPart ? 1 : 0 ;
+
+	if ((~flags & STOPPED) && (omx_egl_buffers[current_buffer]->nFlags != 1))
 	{
+		delta_time = time_us() - timer;
+		// printf("%lu ", delta_time / 1000);
+		// ts();
 		// ts(); //start the timer
-		int err = OMX_FillThisBuffer (ILC_GET_HANDLE (egl_render), omx_egl_buffers[*current_texture]);
+
+		// vsync_offset( 16666 );
+
+		int drift = (12666 - delta_time % 16666 ) / 10;
+		if (drift > 200) drift = 200;
+		if (drift < -200) drift = -200;
+		// if ((drift < 10) && (drift > -10)) drift = 0;
+		// printf("%lu %lu %d drift: %d\n",time_us(), timer, delta_time / 1000, drift);
+		// printf("%d drift: %d\n", delta_time / 1000, drift);
+
+
+		// if (~flags & PAUSED)
+		// {
+		// 	OMX_TIME_CONFIG_SCALETYPE scale;
+		// 	OMX_INIT_STRUCTURE(scale);
+		// 	scale.xScale 			= (1 << 16);
+		// 	// scale.xScale 			= 65536 - drift;
+
+		// 	OMX_ERRORTYPE omx_error;
+		// 	if ((omx_error = OMX_SetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeScale, &scale)) != OMX_ErrorNone)
+		// 		fprintf (stderr, "Could not set scale parameter on video clock. Error 0x%08x\n", omx_error);
+		// }
+
+		current_buffer = (current_buffer + 1) % BUFFER_COUNT;
+		pthread_mutex_lock (&buffer_filled_mut);
+		*current_texture = (*current_texture + 1) % BUFFER_COUNT;
+		pthread_mutex_unlock (&buffer_filled_mut);
+		// // pthread_cond_broadcast (&buffer_filled_cond);
+		int err = OMX_FillThisBuffer (ILC_GET_HANDLE (egl_render), omx_egl_buffers[current_buffer]);
 		if ( err != OMX_ErrorNone )
 			fprintf (stderr, "OMX_FillThisBuffer failed for egl buffer in callback\n");
-		// tp(); // print the time spent on filling the buffer
 
-		*current_texture = (*current_texture + 1) % BUFFER_COUNT;
+		// if ((flags & LAST_BUFFER) && last_frame)
+		// {
+		// 	// repeat_count++;
+		// 	// printf("---------repeat_count %d\n", repeat_count);
+		// 	printf("---------LAST EGL_RENDER CALLBACK --------------\n");
+		// 	SET_FLAG(LAST_FRAME);
+		// }
+		// printf("%lu ", te() );
+
+		// pthread_mutex_lock (&buffer_filled_mut);
+		// while (!vsync_triggered)
+		// 	pthread_cond_wait (&buffer_filled_cond, &buffer_filled_mut);
+		// vsync_triggered = 0;
+		// printf("fill %d\n", *current_texture);
+
+		// ilclient_change_component_state (egl_render, OMX_StatePause);
+		// ilclient_change_component_state (egl_render, OMX_StateWaitForResources);
+		// pthread_mutex_unlock (&buffer_filled_mut);
+
+		// pthread_mutex_lock (&buffer_filled_mut);
+		// if ( vsync_triggered == 1 )
+		// {
+		// 	// ilclient_change_component_state (video_clock, OMX_StatePause);
+		// 	vsync_triggered = 0;
+		// }
+		// pthread_mutex_unlock (&buffer_filled_mut);
+
+		// tp(); // print the time spent on filling the buffer
+		// usleep(16666);
+
 	}
+	// pthread_mutex_unlock (&buffer_filled_mut);
+}
+
+
+void tick ()
+{
+	timer = time_us();
+	// pthread_mutex_lock (&buffer_filled_mut);
+	// vsync_triggered = 1;
+	// // pthread_cond_broadcast (&buffer_filled_cond);
+	// // ilclient_change_component_state (video_clock, OMX_StateExecuting);
+	// pthread_mutex_unlock (&buffer_filled_mut);
 }
 
 /**
@@ -194,10 +382,40 @@ static void fill_egl_texture_buffer (void* data, COMPONENT_T* c)
 static inline int decode_video_packet ()
 {
 	int packet_size = 0;
-	OMX_TICKS ticks = omx_timestamp (video_packet);
+	// OMX_TICKS ticks = omx_timestamp (video_packet);
+	int64_t timestamp = int64_timestamp (video_packet);
+	// printf("V: %lli\n", timestamp);
+	// printf("timestamp: %lli packet size: %i\n", timestamp, video_packet.size);
+
+	// printf("TICKS V: %d\n", ticks);
+	// if (ticks.nLowPart == pts__omx_timestamp(0).nLowPart)
+	// {
+		// printf("TIMESTAMP 0 ---------\n");
+		// OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp;
+		// OMX_INIT_STRUCTURE(timestamp);
+		// timestamp.nPortIndex			= CLOCK_VIDEO_PORT;
+		// timestamp.nTimestamp 			= pts__omx_timestamp(0);
+
+		// ilclient_change_component_state (video_scheduler, OMX_StatePause);
+		// ilclient_change_component_state (audio_render, OMX_StatePause);
+		// ilclient_change_component_state (video_clock, OMX_TIME_ClockStateStopped);
+		// if (OMX_SetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeClientStartTime, &timestamp) != OMX_ErrorNone)
+		// 	printf("FAILED TO RESET CLOCK 1 ---------\n");
+		// if (OMX_SetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeCurrentVideoReference, &timestamp) != OMX_ErrorNone)
+		// 	printf("FAILED TO RESET CLOCK 2 ---------\n");
+		// if (OMX_SetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeCurrentAudioReference, &timestamp) != OMX_ErrorNone)
+		// 	printf("FAILED TO RESET CLOCK 3 ---------\n");
+		// SET_FLAG (FIRST_VIDEO);
+		// ilclient_change_component_state (video_clock, OMX_TIME_ClockStateRunning);
+		// ilclient_change_component_state (audio_render, OMX_StateExecuting);
+		// ilclient_change_component_state (video_scheduler, OMX_StateExecuting);
+	// }
 
 	while (video_packet.size > 0)
 	{
+		// printState(ILC_GET_HANDLE(video_clock));
+		// ticks.nLowPart  -= 16660 * 0.5;
+		// printf("timestamp: %d\n", ticks.nLowPart);
 		// feed data to video decoder
 		if ((omx_video_buffer = ilclient_get_input_buffer (video_decode, VIDEO_DECODE_INPUT_PORT, 1)) == NULL)
 		{
@@ -208,7 +426,8 @@ static inline int decode_video_packet ()
 		omx_video_buffer->nFilledLen = packet_size;
 		omx_video_buffer->nOffset    = 0;
 		omx_video_buffer->nFlags     = 0;
-		omx_video_buffer->nTimeStamp = ticks;
+		// omx_video_buffer->nTimeStamp = ticks;
+
 		// copy data to buffer
 		memcpy (omx_video_buffer->pBuffer, video_packet.data, packet_size);
 		video_packet.size -= packet_size;
@@ -216,11 +435,47 @@ static inline int decode_video_packet ()
 
 		if (flags & FIRST_VIDEO)
 		{
-			omx_video_buffer->nFlags = OMX_BUFFERFLAG_STARTTIME;
-			UNSET_FLAG (FIRST_VIDEO)
+			printf("FIRST_VIDEO ---------\n");
+			omx_video_buffer->nFlags = OMX_BUFFERFLAG_STARTTIME | OMX_BUFFERFLAG_DISCONTINUITY;
+			UNSET_FLAG (FIRST_VIDEO);
 		}
-		else if (omx_video_buffer->nTimeStamp.nLowPart == 0 && omx_video_buffer->nTimeStamp.nHighPart == 0)
-			omx_video_buffer->nFlags |= OMX_BUFFERFLAG_TIME_UNKNOWN;
+		else if (timestamp == 0)
+		{
+			// printf("REPEAT ---------\n");
+			// omx_video_buffer->nFlags |= OMX_BUFFERFLAG_STARTTIME;
+			// repeat_count ++;
+			// printf("repeat_count: %d offset: %lli\n", repeat_count, (int64_t)audio_duration * (int64_t)repeat_count);
+			// printf("nLowPart: %d nHighPart %d repeat_count: %d\n", omx_video_buffer->nTimeStamp.nHighPart, omx_video_buffer->nTimeStamp.nLowPart + ((6989206 + 23220) * repeat_count), repeat_count);
+
+			// OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp;
+			// OMX_INIT_STRUCTURE(timestamp);
+			// timestamp.nPortIndex			= CLOCK_AUDIO_PORT;
+			// timestamp.nTimestamp 			= pts__omx_timestamp ( 0 );
+			// if (OMX_SetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeCurrentAudioReference, &timestamp) != OMX_ErrorNone)
+			// 	printf("FAILED TO RESET AUDIO CLOCK ---------\n");
+
+			// timestamp.nPortIndex			= CLOCK_VIDEO_PORT;
+			// timestamp.nTimestamp 			= pts__omx_timestamp ( 0 );
+			// if (OMX_SetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeCurrentVideoReference, &timestamp) != OMX_ErrorNone)
+			// 	printf("FAILED TO RESET AUDIO CLOCK ---------\n");
+		}
+
+		// TODO: extend/shrink audio buffers to match video duration
+		// omx_video_buffer->nTimeStamp = pts__omx_timestamp( timestamp + (int64_t)audio_duration * (int64_t)repeat_count);
+		omx_video_buffer->nTimeStamp = pts__omx_timestamp(timestamp);
+
+
+		// printf("%u\n", omx_video_buffer->nTimeStamp.nLowPart );
+		// printf("%lli ", int64_timestamp (video_packet));
+		// printf("%lli\n",(int64_t)(audio_duration * repeat_count));
+
+
+			// OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp;
+			// OMX_INIT_STRUCTURE(timestamp);
+			// timestamp.nPortIndex			= 101;
+			// timestamp.nTimestamp 			= pts__omx_timestamp ( 0 );
+			// if (OMX_SetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeClientStartTime, &timestamp) != OMX_ErrorNone)
+			// 	printf("FAILED TO RESET CLOCK ---------\n");
 
 		// end of frame
 		if (video_packet.size == 0)
@@ -265,35 +520,95 @@ static inline int decode_video_packet ()
 					}
 				}
 
-				OMX_PARAM_PORTDEFINITIONTYPE portFormat;
-				OMX_INIT_STRUCTURE(portFormat);
-				portFormat.nPortIndex = EGL_RENDER_OUT_PORT;
+// OMX_PARAM_PORTDEFINITIONTYPE portFormat;
+// OMX_INIT_STRUCTURE(portFormat);
+// portFormat.nPortIndex = EGL_RENDER_OUT_PORT;
 
-				OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+// OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
 
-				printf("nBufferCountActual: %d\n", portFormat.nBufferCountActual );
-				printf("nBufferCountMin: %d\n", portFormat.nBufferCountMin );
-				printf("nBufferAlignment: %d\n", portFormat.nBufferAlignment );
+// printf("nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+// printf("nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+// printf("nBufferSize: %d\n", portFormat.nBufferSize );
+
+OMX_PARAM_PORTDEFINITIONTYPE portFormat;
+OMX_INIT_STRUCTURE(portFormat);
+portFormat.nPortIndex = VIDEO_DECODE_INPUT_PORT;
+
+OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat);
+printf("IN nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+printf("IN nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+printf("IN nBufferSize: %d\n", portFormat.nBufferSize );
+
+portFormat.nBufferCountActual = 1;
+portFormat.nBufferSize = 81920;
+OMX_SetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat);
+printf("IN nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+printf("IN nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+printf("IN nBufferSize: %d\n", portFormat.nBufferSize );
+
+
+OMX_PARAM_PORTDEFINITIONTYPE portFormat2;
+OMX_INIT_STRUCTURE(portFormat2);
+portFormat2.nPortIndex = VIDEO_DECODE_OUT_PORT;
+
+
+OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat2);
+printf("OUT nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
+printf("OUT nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
+printf("OUT nBufferSize: %d\n", portFormat2.nBufferSize );
+
+
+// not sure if this is what I want, egl_render discard ?
+// OMX_CONFIG_BUFFERSTALLTYPE stallDelay;
+// OMX_INIT_STRUCTURE(stallDelay);
+// stallDelay.nPortIndex = VIDEO_DECODE_OUT_PORT;
+// if(OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexConfigBufferStall, &stallDelay) != OMX_ErrorNone)
+// stallDelay.nDelay = 50000;
+// if(OMX_SetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexConfigBufferStall, &stallDelay) != OMX_ErrorNone)
+// 	printf ("OMX_IndexConfigBufferStall Set failed.\n");
+// if(OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexConfigBufferStall, &stallDelay) != OMX_ErrorNone)
+// 	printf ("OMX_IndexConfigBufferStall Get failed.\n");
+// printf("OMX_IndexConfigBufferStall: %d\n", stallDelay.nDelay );
+
+
+
+
+// portFormat2.nBufferCountActual = 2;
+// portFormat2.nBufferSize = 81920;
+// OMX_SetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat2);
+// printf("OUT nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
+// printf("OUT nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
+// printf("OUT nBufferSize: %d\n", portFormat2.nBufferSize );
+
+
+
 
 				// Set egl_render to executing
 				ilclient_change_component_state (egl_render, OMX_StateExecuting);
 				// Request egl_render to write data to the texture buffer
-				if (OMX_FillThisBuffer (ILC_GET_HANDLE (egl_render), omx_egl_buffers[*current_texture]) != OMX_ErrorNone)
+				// *current_texture = (*current_texture + 1) % BUFFER_COUNT;
+				if (OMX_FillThisBuffer (ILC_GET_HANDLE (egl_render), omx_egl_buffers[current_buffer]) != OMX_ErrorNone)
 				{
 					fprintf (stderr, "OMX_FillThisBuffer failed for egl buffer.\n");
 					return 1;
 				}
-				*current_texture = (*current_texture + 1) % BUFFER_COUNT;
 			}
 			// if we are not rendering to texture we just need to change the video renderer to excecuting
 			else
 				ilclient_change_component_state (video_render, OMX_StateExecuting);
 		}
+		// usleep(16666 * 0.25);
 		// empty buffer
+		// if (got_video_frame == 0)
 		if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (video_decode), omx_video_buffer) != OMX_ErrorNone)
 		{
 			fprintf (stderr, "Error emptying video decode buffer\n");
 			return 1;
+		}
+		if (flags & CLOCK_PAUSED)
+		{
+			// setup_clock();
+			UNSET_FLAG(CLOCK_PAUSED);
 		}
 	}
 	return 0;
@@ -308,33 +623,89 @@ static void video_decoding_thread ()
 {
 	uint8_t *d;
 	int ret;
-	while (~flags & STOPPED && (~flags & DONE_READING || video_packet_fifo.n_packets))
+	while (1)
 	{
-		// check pause
-		if (flags & PAUSED)
+		while (~flags & STOPPED && (~flags & DONE_READING || video_packet_fifo.n_packets))
 		{
-			WAIT_WHILE_PAUSED
+			// printf("%d %d\n",flags, video_packet_fifo.n_packets );
+			// check pause
+			if (flags & PAUSED)
+			{
+				WAIT_WHILE_PAUSED
+			}
+			// get packet
+			pthread_mutex_lock (&video_mutex);
+			if ((ret = pop_packet (&video_packet_fifo, &video_packet)) != 0)
+			{
+
+				pthread_mutex_unlock (&video_mutex);
+				usleep (FIFO_SLEEPY_TIME);
+				continue;
+			}
+			// decode
+			d = video_packet.data;
+			ret = decode_video_packet ();
+			video_packet.data = d;
+			av_packet_unref (&video_packet);
+			pthread_mutex_unlock (&video_mutex);
+			if (ret != 0)
+			{
+				fprintf (stderr, "Error while decoding, ending thread\n");
+				break;
+			}
+			// usleep(100); // TODO better way of handling excessive CPU usage
 		}
-		// get packet
-		// pthread_mutex_lock (&video_mutex);
-		if ((ret = pop_packet (&video_packet_fifo, &video_packet)) != 0)
+		if ((flags & DONE_READING) && (~flags & LAST_BUFFER))
 		{
-			// pthread_mutex_unlock (&video_mutex);
-			usleep (FIFO_SLEEPY_TIME);
-			continue;
+			// repeat_count++;
+			// printf("---------repeat_count %d\n", repeat_count);
+
+			// printf("--------------------- EMITTED EMPTY FRAME\n");
+			// // usleep(16666);
+			// if ((omx_video_buffer = ilclient_get_input_buffer (video_decode, VIDEO_DECODE_INPUT_PORT, 1)) != NULL)
+			// {
+			// 	omx_video_buffer->nFilledLen = 0;
+			// 	omx_video_buffer->nTimeStamp = pts__omx_timestamp(6990311);
+			// 	omx_video_buffer->nFlags 	 =  OMX_BUFFERFLAG_ENDOFFRAME | OMX_BUFFERFLAG_DISCONTINUITY;
+			// 	if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (video_decode), omx_video_buffer) != OMX_ErrorNone)
+		 //            printf ("error emptying last buffer\n");
+			// }
+			// // usleep(16666);
+			// if ((omx_video_buffer = ilclient_get_input_buffer (video_decode, VIDEO_DECODE_INPUT_PORT, 1)) != NULL)
+			// {
+			// 	omx_video_buffer->nFilledLen = 0;
+			// 	omx_video_buffer->nTimeStamp = pts__omx_timestamp(6990311);
+			// 	omx_video_buffer->nFlags 	 =  OMX_BUFFERFLAG_DISCONTINUITY | OMX_BUFFERFLAG_FRAGMENTLIST;
+			// 	if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (video_decode), omx_video_buffer) != OMX_ErrorNone)
+		 //            printf ("error emptying last buffer\n");
+			// }
+			// // usleep(16666);
+
+			printf("--------------------- EMITTED EOS\n");
+			// sleep(2);
+			if ((omx_video_buffer = ilclient_get_input_buffer (video_decode, VIDEO_DECODE_INPUT_PORT, 1)) != NULL)
+			{
+				omx_video_buffer->nFilledLen = 0;
+				// omx_video_buffer->nTimeStamp = pts__omx_timestamp(6990311);
+				// omx_video_buffer->nFlags 	 =  OMX_BUFFERFLAG_SYNCFRAME | OMX_BUFFERFLAG_EOS | OMX_BUFFERFLAG_DISCONTINUITY;
+				omx_video_buffer->nFlags 	 =  OMX_BUFFERFLAG_SYNCFRAME | OMX_BUFFERFLAG_EOS | OMX_BUFFERFLAG_DISCONTINUITY;
+				if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (video_decode), omx_video_buffer) != OMX_ErrorNone)
+		            printf ("error emptying last buffer\n");
+			}
+			SET_FLAG(LAST_BUFFER);
+			// sleep(2);
 		}
-		// decode
-		d = video_packet.data;
-		ret = decode_video_packet ();
-		video_packet.data = d;
-		av_packet_unref (&video_packet);
-		// pthread_mutex_unlock (&video_mutex);
-		if (ret != 0)
+		else
 		{
-			fprintf (stderr, "Error while decoding, ending thread\n");
-			break;
+			usleep(FIFO_SLEEPY_TIME); // TODO better way of handling excessive CPU usage
 		}
 	}
+	// printf("%d %d STOP\n",flags, video_packet_fifo.n_packets );
+	// printf ("waiting for egl_render\n");
+	// ilclient_return_events(egl_render); // tu cie mam?
+	// ilclient_wait_for_event(egl_render, OMX_EventBufferFlag, EGL_RENDER_INPUT_PORT, 0, OMX_BUFFERFLAG_EOS, 0, ILCLIENT_BUFFER_FLAG_EOS, 5000);
+	// ilclient_wait_for_event(video_decode, OMX_EventBufferFlag, VIDEO_DECODE_INPUT_PORT, 0, OMX_BUFFERFLAG_EOS, 0, ILCLIENT_BUFFER_FLAG_EOS, 5000);
+	                 // COMPONENT_T *comp, OMX_EVENTTYPE event, OMX_U32 nData1,int ignore1,OMX_U32 nData2, int ignore2, int event_flag, int timeout;
 	printf ("stopping video decoding thread\n");
 }
 
@@ -346,9 +717,18 @@ static inline int decode_audio_packet ()
 {
 	int got_frame = 0, ret = 0, data_size = 0;
 	uint8_t *audio_data, *audio_data_p = NULL;
-	OMX_TICKS ticks = omx_timestamp (audio_packet);
+	// OMX_TICKS ticks = omx_timestamp (audio_packet);
+	int64_t timestamp = int64_timestamp (video_packet);
+	// printf("A: %lli\n", timestamp);
+
+	// int duration = (audio_packet.duration * audio_stream->time_base.num * AV_TIME_BASE) / audio_stream->time_base.den;
+	// printf("%i %lli\n", duration, timestamp);
+
+	// printf("TICKS A: %d\n", ticks);
+	// printf("audio timestamp: %d\n", ticks.nLowPart);
 
 	// some audio decoders only decode part of the data
+	// printf("audio_packet.size %d ", audio_packet.size);
 	while (audio_packet.size > 0)
 	{
 		if ((ret = avcodec_decode_audio4 (audio_codec_ctx, av_frame, &got_frame, &audio_packet)) < 0)
@@ -358,7 +738,6 @@ static inline int decode_audio_packet ()
 		}
 		audio_packet.size -= ret;
 		audio_packet.data += ret;
-
 		if (got_frame)
 		{
 			if ((data_size = av_samples_get_buffer_size (NULL,
@@ -403,6 +782,7 @@ static inline int decode_audio_packet ()
 			// send frame data to audio render
 			while (data_size > 0)
 			{
+				// printf("%d ", data_size);
 				if ((omx_audio_buffer = ilclient_get_input_buffer (audio_render, AUDIO_RENDER_INPUT_PORT, 1)) == NULL)
 				{
 					fprintf ( stderr, "Error getting buffer to audio decoder\n" );
@@ -419,27 +799,52 @@ static inline int decode_audio_packet ()
 				// first audio packet of stream
 				if (flags & FIRST_AUDIO)
 				{
-					omx_audio_buffer->nFlags = OMX_BUFFERFLAG_STARTTIME;
+					printf("FIRST_AUDIO ---------\n");
+					omx_audio_buffer->nFlags = OMX_BUFFERFLAG_SYNCFRAME | OMX_BUFFERFLAG_STARTTIME | OMX_BUFFERFLAG_DISCONTINUITY;
 					UNSET_FLAG (FIRST_AUDIO)
 				}
 				else
 				{
-					omx_audio_buffer->nTimeStamp = ticks;
+					// omx_audio_buffer->nTimeStamp = ticks;
 					if (omx_audio_buffer->nTimeStamp.nLowPart == 0 && omx_audio_buffer->nTimeStamp.nHighPart == 0)
 						omx_audio_buffer->nFlags |= OMX_BUFFERFLAG_TIME_UNKNOWN;
 				}
+
+				// omx_video_buffer->nTimeStamp = pts__omx_timestamp( timestamp + ((int64_t)video_duration - (int64_t)audio_duration) * (int64_t)repeat_count);
+				// omx_video_buffer->nTimeStamp = pts__omx_timestamp( timestamp - ((int64_t)0) * (int64_t)repeat_count);
+				omx_video_buffer->nTimeStamp = pts__omx_timestamp(timestamp);
+
+
+
+	// OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp_offset;
+	// OMX_INIT_STRUCTURE(timestamp_offset);
+	// timestamp_offset.nPortIndex = AUDIO_RENDER_CLOCK_PORT;
+	// timestamp_offset.nTimestamp = pts__omx_timestamp (0L);
+
+	// if(OMX_SetConfig(ILC_GET_HANDLE (audio_render), OMX_IndexConfigPresentationOffset, &timestamp_offset) != OMX_ErrorNone)
+	// {
+	// 	printf("failed to set audio offset offset\n");
+	// }
+
+
+
 				// last packet of frame
 				if (data_size == 0 && audio_packet.size == 0)
 					omx_audio_buffer->nFlags |= OMX_BUFFERFLAG_ENDOFFRAME;
 				// empty the buffer for render
+				// ts();
 				if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (audio_render), omx_audio_buffer) != OMX_ErrorNone)
 				{
 					fprintf (stderr, "Error emptying audio render buffer\n");
 					return 1; // errors with hardware, stop trying to render audio
 				}
+				// tp();
 			}
 		}
 	}
+
+	// printf("\n");
+
 	if (audio_data_p)
 		free (audio_data_p);
 	audio_packet.size = 0;
@@ -497,38 +902,46 @@ static void audio_decoding_thread ()
 	// AVPacket tmp_pack;
 	uint8_t *d;
 	int ret;
-	while (~flags & STOPPED && ~flags & NO_AUDIO_STREAM)
+	while (1)
 	{
-		// check if we are done demuxing
-		if (flags & DONE_READING && !audio_packet_fifo.n_packets)
-			break;
-		// paused
-		if (flags & PAUSED)
+		while (~flags & STOPPED && ~flags & NO_AUDIO_STREAM)
 		{
-			WAIT_WHILE_PAUSED
-		}
-		// pop a audio packet from the decoding queue
-		// pthread_mutex_lock (&audio_mutex);
-		if ((ret = pop_packet (&audio_packet_fifo, &audio_packet)) != 0)
-		{
-			// pthread_mutex_unlock (&audio_mutex);
-			usleep (FIFO_SLEEPY_TIME);
-			continue;
-		}
-		// send data for decoding
-		d = audio_packet.data;
-		ret = flags & HARDWARE_DECODE_AUDIO ? hardwaredecode_audio_packet () : decode_audio_packet () ;
-		audio_packet.data = d;
-		// pthread_mutex_unlock (&audio_mutex);
+			// printf("audio_packet_fifo.n_packets %d\n", audio_packet_fifo.n_packets);
+			// check if we are done demuxing
+			if (flags & DONE_READING && !audio_packet_fifo.n_packets)
+				break;
+			// paused
+			if (flags & PAUSED)
+			{
+				WAIT_WHILE_PAUSED
+			}
+			// pop a audio packet from the decoding queue
+			pthread_mutex_lock (&audio_mutex);
+			if ((ret = pop_packet (&audio_packet_fifo, &audio_packet)) != 0)
+			{
+				pthread_mutex_unlock (&audio_mutex);
+				usleep (FIFO_SLEEPY_TIME);
+				continue;
+			}
+			// send data for decoding
+			d = audio_packet.data;
+			ret = flags & HARDWARE_DECODE_AUDIO ? hardwaredecode_audio_packet () : decode_audio_packet () ;
+			audio_packet.data = d;
+			pthread_mutex_unlock (&audio_mutex);
 
-		// deallocate packet
-		if (ret == 0)
-			av_packet_unref (&audio_packet);
-		else if (ret > 0)
-		{
-			fprintf (stderr, "Error while decoding audio packet, ending thread\n");
-			break;
+			// deallocate packet
+			if (ret == 0)
+				av_packet_unref (&audio_packet);
+			else if (ret > 0)
+			{
+				fprintf (stderr, "Error while decoding audio packet, ending thread\n");
+				break;
+			}
+			usleep(10); // TODO better way of handling excessive CPU usage
 		}
+		// printf("FIFO_SLEEPY_TIME AUDIO\n");
+		// usleep(FIFO_SLEEPY_TIME); // TODO better way of handling excessive CPU usage
+		usleep(10); // TODO better way of handling excessive CPU usage
 	}
 	printf ("stopping audio decoding thread\n");
 }
@@ -547,7 +960,12 @@ static inline int process_packet ()
 
 	// current packet is video
 	if (av_packet.stream_index == video_stream_idx)
+	{
+		// int64_t timestamp = int64_timestamp (av_packet);
+		// printf("-: %lli\n", timestamp);
+
 		buf = &video_packet_fifo;
+	}
 	// current packet is audio
 	else if (av_packet.stream_index == audio_stream_idx)
 		buf = &audio_packet_fifo;
@@ -579,7 +997,6 @@ static inline int process_packet ()
 static int open_video ()
 {
 	int ret = 0;
-	OMX_VIDEO_PARAM_PORTFORMATTYPE video_format;
 	int render_input_port = VIDEO_RENDER_INPUT_PORT;
 
 	memset (video_tunnel, 0, sizeof (video_tunnel));
@@ -591,19 +1008,69 @@ static int open_video ()
 	}
 	list[0] = video_decode;
 
-	// Fix for hang on ilclient_disable_port_buffers
-	// Need to find a better solution as it degrades the performance.
-	// Also the colorspace of decoded frames switches to limited.
+// Fix for hang on ilclient_disable_port_buffers
+// Need to find a better solution as it degrades the performance.
+// Also the colorspace of decoded frames switches to limited.
 
-	// OMX_PARAM_BRCMDISABLEPROPRIETARYTUNNELSTYPE tunnelConfig;
-	// OMX_INIT_STRUCTURE(tunnelConfig);
-	// tunnelConfig.nPortIndex = 131;
-	// tunnelConfig.bUseBuffers = OMX_TRUE;
-	// if (OMX_SetParameter(ILC_GET_HANDLE(video_decode), OMX_IndexParamBrcmDisableProprietaryTunnels, &tunnelConfig) != OMX_ErrorNone)
-	// {
-	// 	printf("OMX_IndexParamBrcmDisableProprietaryTunnels failed.\n");
-	// 	exit(1);
-	// }
+// OMX_PARAM_BRCMDISABLEPROPRIETARYTUNNELSTYPE tunnelConfig;
+// OMX_INIT_STRUCTURE(tunnelConfig);
+// tunnelConfig.nPortIndex = 131;
+// tunnelConfig.bUseBuffers = OMX_TRUE;
+// if (OMX_SetParameter(ILC_GET_HANDLE(video_decode), OMX_IndexParamBrcmDisableProprietaryTunnels, &tunnelConfig) != OMX_ErrorNone)
+// {
+// 	printf("OMX_IndexParamBrcmDisableProprietaryTunnels failed.\n");
+// 	exit(1);
+// }
+
+// OMX_PARAM_U32TYPE extraBuffers;
+// OMX_INIT_STRUCTURE(extraBuffers);
+// extraBuffers.nPortIndex = 131;
+// if (OMX_GetParameter(ILC_GET_HANDLE(video_decode), OMX_IndexParamBrcmExtraBuffers, &extraBuffers) != OMX_ErrorNone)
+// 	printf("OMX_IndexParamBrcmExtraBuffers failed.\n");
+// else
+// 	printf("OMX_IndexParamBrcmExtraBuffers: %u\n", extraBuffers.nU32);
+// extraBuffers.nU32 = 4;
+// if (OMX_SetParameter(ILC_GET_HANDLE(video_decode), OMX_IndexParamBrcmExtraBuffers, &extraBuffers) != OMX_ErrorNone)
+// 	printf("OMX_IndexParamBrcmExtraBuffers failed.\n");
+// else
+// 	printf("OMX_IndexParamBrcmExtraBuffers: %u\n", extraBuffers.nU32);
+
+// extraBuffers.nPortIndex = 130;
+// if (OMX_GetParameter(ILC_GET_HANDLE(video_decode), OMX_IndexParamBrcmExtraBuffers, &extraBuffers) != OMX_ErrorNone)
+// 	printf("OMX_IndexParamBrcmExtraBuffers failed.\n");
+// else
+// 	printf("OMX_IndexParamBrcmExtraBuffers: %u\n", extraBuffers.nU32);
+
+
+// interpolate missing timestamps
+// OMX_CONFIG_BOOLEANTYPE interpolateTimestamps;
+// OMX_INIT_STRUCTURE(interpolateTimestamps);
+// // interpolateTimestamps.nPortIndex = 131;
+// if (OMX_GetParameter(ILC_GET_HANDLE(video_decode), OMX_IndexParamBrcmInterpolateMissingTimestamps, &interpolateTimestamps) != OMX_ErrorNone)
+// 	printf("OMX_IndexParamBrcmInterpolateMissingTimestamps failed.\n");
+// else
+// 	printf("OMX_IndexParamBrcmInterpolateMissingTimestamps: %d\n", interpolateTimestamps.bEnabled);
+// interpolateTimestamps.bEnabled = OMX_FALSE; //default is true
+// if (OMX_SetParameter(ILC_GET_HANDLE(video_decode), OMX_IndexParamBrcmInterpolateMissingTimestamps, &interpolateTimestamps) != OMX_ErrorNone)
+// 	printf("OMX_IndexParamBrcmInterpolateMissingTimestamps failed.\n");
+// else
+// 	printf("OMX_IndexParamBrcmInterpolateMissingTimestamps: %d\n", interpolateTimestamps.bEnabled);
+
+
+// don't reorder timestamps
+// OMX_CONFIG_BOOLEANTYPE reorderTimestamps;
+// OMX_INIT_STRUCTURE(reorderTimestamps);
+
+// if (OMX_GetParameter(ILC_GET_HANDLE(video_decode), OMX_IndexParamBrcmVideoTimestampFifo, &reorderTimestamps) != OMX_ErrorNone)
+// 	printf("OMX_IndexParamBrcmVideoTimestampFifo failed.\n");
+// else
+// 	printf("OMX_IndexParamBrcmVideoTimestampFifo: %d\n", reorderTimestamps.bEnabled);
+
+// reorderTimestamps.bEnabled = OMX_TRUE; //default is false
+// if (OMX_SetParameter(ILC_GET_HANDLE(video_decode), OMX_IndexParamBrcmVideoTimestampFifo, &reorderTimestamps) != OMX_ErrorNone)
+// 	printf("OMX_IndexParamBrcmVideoTimestampFifo failed.\n");
+// else
+// 	printf("OMX_IndexParamBrcmVideoTimestampFifo: %d\n", reorderTimestamps.bEnabled);
 
 
 	// create the render component which is either a video_render (the display) or egl_render (texture)
@@ -619,13 +1086,35 @@ static int open_video ()
 		list[1] = egl_render;
 		render_input_port = EGL_RENDER_INPUT_PORT;
 
-		// set nBufferCountActual to allow binding 2 textures
-		OMX_PARAM_PORTDEFINITIONTYPE portFormat;
-  		OMX_INIT_STRUCTURE(portFormat);
-  		portFormat.nPortIndex = EGL_RENDER_OUT_PORT;
-  		OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
-  		portFormat.nBufferCountActual = BUFFER_COUNT;
-  		OMX_SetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+
+// set nBufferCountActual to allow binding 2 textures
+OMX_PARAM_PORTDEFINITIONTYPE portFormat;
+OMX_INIT_STRUCTURE(portFormat);
+portFormat.nPortIndex = EGL_RENDER_OUT_PORT;
+OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+portFormat.nBufferCountActual = BUFFER_COUNT;
+OMX_SetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+
+portFormat.nPortIndex = EGL_RENDER_INPUT_PORT;
+OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+portFormat.nBufferCountActual = 1;
+OMX_SetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+
+
+OMX_CONFIG_PORTBOOLEANTYPE discardMode;
+OMX_INIT_STRUCTURE(discardMode);
+discardMode.nPortIndex = 220;
+if (OMX_GetParameter(ILC_GET_HANDLE(egl_render), OMX_IndexParamBrcmVideoEGLRenderDiscardMode, &discardMode) != OMX_ErrorNone)
+	printf("OMX_IndexParamBrcmVideoEGLRenderDiscardMode failed.\n");
+else
+	printf("OMX_IndexParamBrcmVideoEGLRenderDiscardMode: %u\n", discardMode.bEnabled);
+discardMode.bEnabled = OMX_TRUE;
+if (OMX_SetParameter(ILC_GET_HANDLE(egl_render), OMX_IndexParamBrcmVideoEGLRenderDiscardMode, &discardMode) != OMX_ErrorNone)
+	printf("OMX_IndexParamBrcmVideoEGLRenderDiscardMode failed.\n");
+else
+	printf("OMX_IndexParamBrcmVideoEGLRenderDiscardMode: %u\n", discardMode.bEnabled);
+
+
 	}
 	else
 	{
@@ -643,6 +1132,62 @@ static int open_video ()
 		fprintf (stderr, "Error creating IL COMPONENT video scheduler\n");
 		ret = -13;
 	}
+
+
+
+
+
+//scheduler buffer
+OMX_PARAM_PORTDEFINITIONTYPE portFormat;
+OMX_INIT_STRUCTURE(portFormat);
+
+portFormat.nPortIndex = 10;
+portFormat.nBufferCountActual = 1;
+OMX_SetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat);
+OMX_GetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat);
+printf("SHD IN nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+printf("SHD IN nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+printf("SHD IN nBufferSize: %d\n", portFormat.nBufferSize );
+
+portFormat.nPortIndex = 11;
+portFormat.nBufferCountActual = 1;
+OMX_SetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat);
+OMX_GetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat);
+printf("SHD OUT nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+printf("SHD OUT nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+printf("SHD OUT nBufferSize: %d\n", portFormat.nBufferSize );
+
+portFormat.nPortIndex = 220;
+
+OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+printf("EGL IN nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+printf("EGL IN nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+printf("EGL IN nBufferSize: %d\n", portFormat.nBufferSize );
+
+portFormat.nPortIndex = 221;
+
+OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+printf("EGL OUT nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+printf("EGL OUT nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+printf("EGL OUT nBufferSize: %d\n", portFormat.nBufferSize );
+
+
+// portFormat.nBufferCountActual = 1;
+// portFormat.nBufferSize = 4096;
+// portFormat.nPortIndex = 100;
+
+// OMX_SetParameter(ILC_GET_HANDLE (audio_render), OMX_IndexParamPortDefinition, &portFormat);
+// printf("AUD nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+// printf("AUD nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+// printf("AUD nBufferSize: %d\n", portFormat.nBufferSize );
+
+
+
+
+
+
+
+
 	list[3] = video_scheduler;
 	// setup tunnels
 	set_tunnel (video_tunnel, 		video_decode, 		 VIDEO_DECODE_OUT_PORT, 	video_scheduler, 	VIDEO_SCHEDULER_INPUT_PORT);
@@ -658,13 +1203,20 @@ static int open_video ()
 	if (ret == 0)
 		ilclient_change_component_state (video_decode, OMX_StateIdle);
 
-	memset (&video_format, 0, sizeof (OMX_VIDEO_PARAM_PORTFORMATTYPE));
-	video_format.nSize 			     = sizeof (OMX_VIDEO_PARAM_PORTFORMATTYPE);
-	video_format.nVersion.nVersion   = OMX_VERSION;
+	OMX_VIDEO_PARAM_PORTFORMATTYPE video_format;
+	OMX_INIT_STRUCTURE(video_format);
 	video_format.nPortIndex 		 = VIDEO_DECODE_INPUT_PORT;
 
 	if (video_stream->r_frame_rate.den > 0)
 		video_format.xFramerate	= (long long) (video_stream->r_frame_rate.num / video_stream->r_frame_rate.den) * (1 << 16);
+		// video_format.xFramerate	= (long long) (60) * (1 << 16);
+
+	printf("FRAME RATE NUM: %d\n", video_stream->r_frame_rate.num );
+	printf("FRAME RATE DEN: %d\n", video_stream->r_frame_rate.den );
+	printf("AVG F RATE NUM: %d\n", video_stream->avg_frame_rate.num );
+	printf("AVG F RATE DEN: %d\n", video_stream->avg_frame_rate.den );
+	printf("FRAME RATE: %d\n", video_format.xFramerate );
+
 
 	switch (video_codec_ctx->codec_id)
 	{
@@ -732,7 +1284,7 @@ static void close_video ()
 	if ((omx_video_buffer = ilclient_get_input_buffer (video_decode, VIDEO_DECODE_INPUT_PORT, 1)) != NULL)
 	{
 		omx_video_buffer->nFilledLen = 0;
-		omx_video_buffer->nFlags 	 = OMX_BUFFERFLAG_ENDOFFRAME | OMX_BUFFERFLAG_EOS | OMX_BUFFERFLAG_TIME_UNKNOWN;
+		omx_video_buffer->nFlags 	 =  OMX_BUFFERFLAG_EOS | OMX_BUFFERFLAG_TIME_UNKNOWN;
 		if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (video_decode), omx_video_buffer) != OMX_ErrorNone)
             fprintf (stderr, "error emptying last buffer =/\n");
 	}
@@ -741,13 +1293,19 @@ static void close_video ()
 
 	// wait for EOS from render
 	printf("VID: Waiting for EOS from render\n");
-	if (~flags & RENDER_2_TEXTURE)
+	if (flags & RENDER_2_TEXTURE)
+		// ilclient_wait_for_event(video_decode, OMX_EventBufferFlag, 131, 0, 0, 1, ILCLIENT_BUFFER_FLAG_EOS, 10000);
+		// sleep(0);
+		//ilclient_wait_for_event(video_decode, OMX_EventBufferFlag, VIDEO_DECODE_OUT_PORT, 0, OMX_BUFFERFLAG_EOS, 0, ILCLIENT_BUFFER_FLAG_EOS, 10000);
+		ilclient_wait_for_event(video_decode, OMX_EventBufferFlag, 131, 0, 0, 1, ILCLIENT_BUFFER_FLAG_EOS, 10000);
+	else
 		ilclient_wait_for_event (video_render, OMX_EventBufferFlag, VIDEO_RENDER_INPUT_PORT, 0, OMX_BUFFERFLAG_EOS, 0, ILCLIENT_BUFFER_FLAG_EOS, 10000);
 	// need to flush the renderer to allow video_decode to disable its input port
 	printf("VID: Flushing tunnels\n");
 	ilclient_flush_tunnels        (video_tunnel, 0);
 	printf("VID: Disabling port buffers\n");
 	ilclient_disable_port_buffers (video_decode, VIDEO_DECODE_INPUT_PORT, NULL, NULL, NULL);
+	ilclient_disable_port_buffers (video_decode, VIDEO_DECODE_OUT_PORT, NULL, NULL, NULL);
 	ilclient_disable_tunnel       (video_tunnel);
 	ilclient_disable_tunnel       (video_tunnel + 1);
 	ilclient_disable_tunnel       (video_tunnel + 2);
@@ -763,11 +1321,9 @@ static void close_video ()
  */
 static int open_audio ()
 {
+	printf("OPENING_AUDIO\n");
 	int ret = 0;
-	OMX_CONFIG_BRCMAUDIODESTINATIONTYPE audio_destination;
 	OMX_ERRORTYPE omx_error;
-	OMX_AUDIO_PARAM_PCMMODETYPE pcm;
-	OMX_AUDIO_PARAM_PORTFORMATTYPE audio_format;
 
 	memset (audio_tunnel, 0, sizeof (audio_tunnel));
 
@@ -779,11 +1335,11 @@ static int open_audio ()
 	}
 	list[4] = audio_render;
 
+
 	// setup audio decoder parameters
 	// 	this will be used if audio decoding is supported by the hardware
-	memset (&audio_format, 0x0, sizeof (OMX_AUDIO_PARAM_PORTFORMATTYPE));
-	audio_format.nSize 				= sizeof (OMX_AUDIO_PARAM_PORTFORMATTYPE);
-	audio_format.nVersion.nVersion 	= OMX_VERSION;
+	OMX_AUDIO_PARAM_PORTFORMATTYPE audio_format;
+	OMX_INIT_STRUCTURE(audio_format);
 	audio_format.nPortIndex 		= 120;
 
 	// check if we can decode audio on hardware
@@ -866,10 +1422,9 @@ static int open_audio ()
 	ilclient_change_component_state (audio_render, OMX_StateIdle);
 
 	// set audio destination
-	memset (&audio_destination, 0x0, sizeof (OMX_CONFIG_BRCMAUDIODESTINATIONTYPE));
+	OMX_CONFIG_BRCMAUDIODESTINATIONTYPE audio_destination;
+	OMX_INIT_STRUCTURE(audio_destination);
 	char* destination_name 			    = flags & ANALOG_AUDIO_OUT ? ANALOG_AUDIO_DESTINATION_NAME : DIGITAL_AUDIO_DESTINATION_NAME;
-	audio_destination.nSize 			= sizeof (OMX_CONFIG_BRCMAUDIODESTINATIONTYPE);
-	audio_destination.nVersion.nVersion = OMX_VERSION;
 	strcpy ((char*) audio_destination.sName, destination_name);
 
 	if ((omx_error = OMX_SetConfig (ILC_GET_HANDLE (audio_render), OMX_IndexConfigBrcmAudioDestination, &audio_destination)) != OMX_ErrorNone)
@@ -878,9 +1433,8 @@ static int open_audio ()
 		return 1;
 	}
 	// set the PCM parameters
-	memset (&pcm, 0, sizeof (OMX_AUDIO_PARAM_PCMMODETYPE));
-	pcm.nSize 				= sizeof (OMX_AUDIO_PARAM_PCMMODETYPE);
-	pcm.nVersion.nVersion 	= OMX_VERSION;
+	OMX_AUDIO_PARAM_PCMMODETYPE pcm;
+	OMX_INIT_STRUCTURE(pcm);
 	pcm.nPortIndex 			= AUDIO_RENDER_INPUT_PORT;
 	pcm.nChannels 			= OUT_CHANNELS (audio_codec_ctx->channels);
 	pcm.eNumData 			= OMX_NumericalDataSigned;
@@ -941,6 +1495,87 @@ static int open_audio ()
     	fprintf (stderr, "Error setting PCM parameters for audio renderer; error: 0x%08x\n", omx_error);
     	return 1;
     }
+
+// get the number/size of buffers
+OMX_PARAM_PORTDEFINITIONTYPE aparam;
+OMX_INIT_STRUCTURE(aparam);
+aparam.nPortIndex = 100;
+
+if (OMX_GetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexParamPortDefinition, &aparam) != OMX_ErrorNone)
+	printf("OMX_GetParameter AUDIO failed.\n");
+else
+{
+	printf("aparam.nBufferSize: %d\n", aparam.nBufferSize);
+	printf("aparam.nBufferCountActual: %d\n", aparam.nBufferCountActual);
+	printf("aparam.nBufferCountMin: %d\n", aparam.nBufferCountMin);
+}
+
+aparam.nBufferSize = 4096;
+aparam.nBufferCountActual = 1;
+
+if (OMX_SetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexParamPortDefinition, &aparam) != OMX_ErrorNone)
+	printf("OMX_SetParameter AUDIO failed.\n");
+
+if (OMX_GetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexParamPortDefinition, &aparam) != OMX_ErrorNone)
+	printf("OMX_GetParameter AUDIO failed.\n");
+else
+{
+	printf("aparam.nBufferSize: %d\n", aparam.nBufferSize);
+	printf("aparam.nBufferCountActual: %d\n", aparam.nBufferCountActual);
+	printf("aparam.nBufferCountMin: %d\n", aparam.nBufferCountMin);
+}
+
+
+
+OMX_CONFIG_BOOLEANTYPE audioClockReference;
+OMX_INIT_STRUCTURE(audioClockReference);
+if (OMX_GetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexConfigBrcmClockReferenceSource, &audioClockReference) != OMX_ErrorNone)
+	printf("OMX_IndexConfigBrcmClockReferenceSource failed.\n");
+else
+	printf("OMX_IndexConfigBrcmClockReferenceSource: %d\n", audioClockReference.bEnabled);
+
+audioClockReference.bEnabled = OMX_FALSE; //default is true
+
+if (OMX_SetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexConfigBrcmClockReferenceSource, &audioClockReference) != OMX_ErrorNone)
+	printf("OMX_IndexConfigBrcmClockReferenceSource failed.\n");
+else
+	printf("OMX_IndexConfigBrcmClockReferenceSource: %d\n", audioClockReference.bEnabled);
+
+
+// AUDIO VOLUME
+OMX_AUDIO_CONFIG_VOLUMETYPE audioVolume;
+OMX_INIT_STRUCTURE(audioVolume);
+audioVolume.nPortIndex = 100;
+if (OMX_GetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexConfigAudioVolume, &audioVolume) != OMX_ErrorNone)
+	printf("OMX_IndexConfigAudioVolume failed.\n");
+else
+	printf("OMX_IndexConfigAudioVolume: %d\n", audioVolume.sVolume.nValue);
+audioVolume.bLinear = OMX_TRUE;
+audioVolume.sVolume.nValue = 20;
+if (OMX_SetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexConfigAudioVolume, &audioVolume) != OMX_ErrorNone)
+	printf("OMX_IndexConfigAudioVolume failed.\n");
+else
+	printf("OMX_IndexConfigAudioVolume: %d\n", audioVolume.sVolume.nValue);
+
+
+//audio ports
+OMX_PARAM_PORTDEFINITIONTYPE portFormat;
+OMX_INIT_STRUCTURE(portFormat);
+portFormat.nPortIndex = 100;
+
+OMX_GetParameter(ILC_GET_HANDLE (audio_render), OMX_IndexParamPortDefinition, &portFormat);
+printf("AUD nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+printf("AUD nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+printf("AUD nBufferSize: %d\n", portFormat.nBufferSize );
+
+portFormat.nBufferCountActual = 1;
+portFormat.nBufferSize = 4096;
+
+OMX_SetParameter(ILC_GET_HANDLE (audio_render), OMX_IndexParamPortDefinition, &portFormat);
+printf("AUD nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+printf("AUD nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+printf("AUD nBufferSize: %d\n", portFormat.nBufferSize );
+
     // change audio renderer state to executing
     ilclient_enable_port_buffers    (audio_render, AUDIO_RENDER_INPUT_PORT, NULL, NULL, NULL);
     ilclient_change_component_state (audio_render, OMX_StateExecuting);
@@ -983,10 +1618,11 @@ static int open_codec_context (int* stream_idx, enum AVMediaType type)
 	int 			ret;
 	AVStream* 	    stream;
 	AVCodecContext* codec_ctx 	= NULL;
-	AVCodec* 	    codec 		= NULL;
+	AVCodec* 	    dec 		= NULL;
 
-	ret = av_find_best_stream (fmt_ctx, type, -1, -1, NULL, 0);
+	ret = av_find_best_stream (fmt_ctx, type, -1, -1, &dec, 0);
 	*stream_idx = ret;
+	printf("STREAM IDX: %i\n", ret);
 	if (ret < 0)
 	{
 		fprintf (stderr, "Could not find %s stream in input file\n", type == AVMEDIA_TYPE_VIDEO ? "video" : "audio");
@@ -995,18 +1631,24 @@ static int open_codec_context (int* stream_idx, enum AVMediaType type)
 
 	stream    = fmt_ctx->streams[*stream_idx];
 	codec_ctx = stream->codec;
-	codec     = avcodec_find_decoder (codec_ctx->codec_id);
+	codec_ctx->workaround_bugs = FF_BUG_AUTODETECT;
+	codec_ctx->thread_count=1;
 
-	if (!codec)
+	printf("codec->codec_id %i\n", dec->id);
+
+
+	if (!dec)
 	{
 		fprintf (stderr, "Failed to find %s codec\n", type == AVMEDIA_TYPE_VIDEO ? "video" : "audio");
 		return 1;
 	}
-	if ((ret = avcodec_open2 (codec_ctx, codec, NULL)) < 0)
+	if ((ret = avcodec_open2 (codec_ctx, dec, NULL)) < 0)
 	{
 		fprintf (stderr, "Failed to open %s codec\n", type == AVMEDIA_TYPE_VIDEO ? "video" : "audio");
 		return ret;
 	}
+	printf("codec_ctx->width: %i\n", codec_ctx->width);
+	printf("codec_ctx->height: %i\n", codec_ctx->height);
 	return 0;
 }
 
@@ -1023,33 +1665,16 @@ static int create_hw_clock ()
 	if (video_clock == NULL)
 		fprintf (stderr, "Error?\n");
 
+	// if (ilclient_create_component (client, &audio_clock, "clock", ILCLIENT_DISABLE_ALL_PORTS) != 0)
+	// {
+	// 	fprintf (stderr, "Error creating IL COMPONENT video clock\n");
+	// 	ret = -14;
+	// }
+	// if (audio_clock == NULL)
+	// 	fprintf (stderr, "Error?\n");
+
 	list[2] = video_clock;
-	return ret;
-}
-
-
-static int setup_clock ()
-{
-	OMX_TIME_CONFIG_CLOCKSTATETYPE clock_state;
-	int ret = 0;
-
-	// set clock configuration
-	memset (&clock_state, 0, sizeof (clock_state));
-	clock_state.nSize             = sizeof (clock_state);
-	clock_state.nVersion.nVersion = OMX_VERSION;
-	clock_state.eState            = OMX_TIME_ClockStateWaitingForStartTime;
-	clock_state.nWaitMask         = 0;
-
-	if (video_stream_idx != AVERROR_STREAM_NOT_FOUND)
-		clock_state.nWaitMask |= OMX_CLOCKPORT0;
-	if (audio_stream_idx != AVERROR_STREAM_NOT_FOUND)
-		clock_state.nWaitMask |= OMX_CLOCKPORT1;
-
-	if (video_clock != NULL && OMX_SetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeClockState, &clock_state) != OMX_ErrorNone)
-	{
-		fprintf (stderr, "Error settings parameters for video clock\n");
-		ret = -13;
-	}
+	// list[7] = audio_clock;
 	return ret;
 }
 
@@ -1091,9 +1716,7 @@ static void cleanup ()
 uint64_t rpi_mp_current_time ()
 {
 	OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp;
-	memset (&timestamp, 0x0, sizeof (timestamp));
-	timestamp.nVersion.nVersion = OMX_VERSION;
-	timestamp.nSize 			= sizeof (OMX_TIME_CONFIG_TIMESTAMPTYPE);
+	OMX_INIT_STRUCTURE(timestamp);
 	timestamp.nPortIndex		= CLOCK_AUDIO_PORT;
 
 	OMX_ERRORTYPE omx_error;
@@ -1116,21 +1739,62 @@ int rpi_mp_seek (int64_t position)
 	lock();
 
 	OMX_TIME_CONFIG_CLOCKSTATETYPE clock;
-	memset ( & clock, 0x0, sizeof ( OMX_TIME_CONFIG_CLOCKSTATETYPE ) );
-	clock.nVersion.nVersion = OMX_VERSION;
-	clock.nSize 			= sizeof ( OMX_TIME_CONFIG_TIMESTAMPTYPE );
+	OMX_INIT_STRUCTURE(clock);
 	clock.eState    		= OMX_TIME_ClockStateStopped;
-	clock.nOffset			= pts__omx_timestamp (-1000LL * 200);
-	// clock.nOffset     = ToOMXTime(-1000LL * OMX_PRE_ROLL);
+	// clock.nOffset			= pts__omx_timestamp (0);
+	// clock.nOffset			= pts__omx_timestamp (-1000LL * 200);
+	// clock.nOffset           = ToOMXTime(-1000LL * OMX_PRE_ROLL);
 
-	if (( omx_error = OMX_SetConfig ( ILC_GET_HANDLE ( video_clock ), OMX_IndexConfigTimeClockState, & clock )) != OMX_ErrorNone )
+	if (( omx_error = OMX_SetParameter ( ILC_GET_HANDLE ( video_clock ), OMX_IndexConfigTimeClockState, & clock )) != OMX_ErrorNone )
 	{
 		fprintf ( stderr, "Could not stop clock. Error 0x%08x\n", omx_error );
 	 	return 0;
 	}
 
+	// ilclient_change_component_state (video_decode, OMX_StatePause);
+	// ilclient_change_component_state (audio_render, OMX_StatePause);
+	// ilclient_change_component_state (video_clock, OMX_StatePause);
+	// ilclient_change_component_state (video_scheduler, OMX_StatePause);
+	// ilclient_change_component_state (egl_render, OMX_StatePause);
+
+	SET_FLAG(CLOCK_PAUSED);
+
+	// disabling this makes audio second pass with preroll
+	// if (( omx_error = OMX_SetParameter ( ILC_GET_HANDLE ( audio_clock ), OMX_IndexConfigTimeClockState, & clock )) != OMX_ErrorNone )
+	// {
+	// 	fprintf ( stderr, "Could not stop clock. Error 0x%08x\n", omx_error );
+	//  	return 0;
+	// }
+
+
 	position *= AV_TIME_BASE;
 	position += fmt_ctx->start_time;
+
+	// seek to frame
+	int ret = av_seek_frame ( fmt_ctx, -1, position, AVSEEK_FLAG_FRAME | AVSEEK_FLAG_BACKWARD );
+
+	double t = (double) position * audio_stream->r_frame_rate.num / audio_stream->r_frame_rate.den;
+
+	// reset hardware clock
+	OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp;
+	OMX_INIT_STRUCTURE(timestamp);
+	timestamp.nPortIndex			= CLOCK_VIDEO_PORT;
+	timestamp.nTimestamp 			= pts__omx_timestamp (t);
+
+	if (( omx_error = OMX_SetParameter ( ILC_GET_HANDLE ( video_clock ), OMX_IndexConfigTimeClientStartTime, & timestamp )) != OMX_ErrorNone )
+	{
+		fprintf ( stderr, "Could not set timestamp for clock component. Error 0x%08x\n", omx_error );
+	 	return 0;
+	}
+
+	// timestamp.nPortIndex			= 80;
+
+	// timestamp.nTimestamp 			= pts__omx_timestamp (1000LL * 1000);
+	// if (( omx_error = OMX_SetParameter ( ILC_GET_HANDLE ( audio_clock ), OMX_IndexConfigTimeClientStartTime, & timestamp )) != OMX_ErrorNone )
+	// {
+	// 	fprintf ( stderr, "Could not set timestamp for clock component. Error 0x%08x\n", omx_error );
+	//  	return 0;
+	// }
 
 	printf ( "trying to seek to position %llu\n", position );
 
@@ -1138,56 +1802,63 @@ int rpi_mp_seek (int64_t position)
 	flush_buffer ( & video_packet_fifo );
 	flush_buffer ( & audio_packet_fifo );
 
+	ilclient_flush_tunnels ( video_tunnel, 0 );
+
 	// flush video buffer
-	//*
 	if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( video_decode ), OMX_CommandFlush, VIDEO_DECODE_INPUT_PORT, NULL ) != OMX_ErrorNone ) )
 	{
 		fprintf ( stderr, "Could not flush video decoder input (0x%08x)\n", omx_error );
 		return 1;
 	}
-	if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( video_render ), OMX_CommandFlush, VIDEO_RENDER_INPUT_PORT, NULL ) != OMX_ErrorNone ) )
-	{
-		fprintf ( stderr, "Could not flush video render input (0x%08x)\n", omx_error );
-		return 1;
-	}
-	ilclient_flush_tunnels ( video_tunnel, 0 );
-	//*/
+	// if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( video_decode ), OMX_CommandFlush, 131, NULL ) != OMX_ErrorNone ) )
+	// {
+	// 	fprintf ( stderr, "Could not flush video decoder output (0x%08x)\n", omx_error );
+	// 	return 1;
+	// }
+
+	// if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( video_scheduler ), OMX_CommandFlush, 10, NULL ) != OMX_ErrorNone ) )
+	// {
+	// 	fprintf ( stderr, "Could not flush video scheduler input (0x%08x)\n", omx_error );
+	// 	return 1;
+	// }
+	// if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( video_scheduler ), OMX_CommandFlush, 11, NULL ) != OMX_ErrorNone ) )
+	// {
+	// 	fprintf ( stderr, "Could not flush video scheduler output (0x%08x)\n", omx_error );
+	// 	return 1;
+	// }
+
+	// if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( egl_render ), OMX_CommandFlush, 220, NULL ) != OMX_ErrorNone ) )
+	// {
+	// 	fprintf ( stderr, "Could not flush egl input (0x%08x)\n", omx_error );
+	// 	return 1;
+	// }
+	// if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( egl_render ), OMX_CommandFlush, 221, NULL ) != OMX_ErrorNone ) )
+	// {
+	// 	fprintf ( stderr, "Could not flush egl output (0x%08x)\n", omx_error );
+	// 	return 1;
+	// }
+
+	// if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( video_render ), OMX_CommandFlush, VIDEO_RENDER_INPUT_PORT, NULL ) != OMX_ErrorNone ) )
+	// {
+	// 	fprintf ( stderr, "Could not flush video render input (0x%08x)\n", omx_error );
+	// 	return 1;
+	// }
+
 
 	// flush audio buffer
-	//*
 	if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( audio_render ), OMX_CommandFlush, AUDIO_RENDER_INPUT_PORT, NULL ) != OMX_ErrorNone ) )
 	{
 		fprintf ( stderr, "Could not flush video decoder input (0x%08x)\n", omx_error );
 		return 1;
 	}
 	ilclient_flush_tunnels ( audio_tunnel, 0 );
-	//*/
 
-	// avcodec_flush_buffers ( video_codec_ctx );
-	// avcodec_flush_buffers ( audio_codec_ctx );
+	avcodec_flush_buffers ( video_codec_ctx );
+	avcodec_flush_buffers ( audio_codec_ctx );
 
-	// seek to frame
-	int ret = av_seek_frame ( fmt_ctx, -1, position, AVSEEK_FLAG_ANY );
 
-	double t = (double) position * audio_stream->r_frame_rate.num / audio_stream->r_frame_rate.den;
 
-	// reset hardware clock
-	OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp;
-	memset ( & timestamp, 0x0, sizeof ( timestamp ) );
-	timestamp.nVersion.nVersion 	= OMX_VERSION;
-	timestamp.nSize 				= sizeof ( OMX_TIME_CONFIG_TIMESTAMPTYPE );
-	timestamp.nPortIndex			= CLOCK_AUDIO_PORT;
-	timestamp.nTimestamp 			= pts__omx_timestamp ( t );
-	// timestamp.nTimestamp.nLowPart 	= 0;
-	// timestamp.nTimestamp.nHighPart 	= 0;
 
-	if (( omx_error = OMX_SetConfig ( ILC_GET_HANDLE ( video_clock ), OMX_IndexConfigTimeCurrentAudioReference, & timestamp )) != OMX_ErrorNone )
-	{
-		fprintf ( stderr, "Could not set timestamp for clock component. Error 0x%08x\n", omx_error );
-	 	return 0;
-	}
-	// SET_FLAG ( FIRST_AUDIO );
-	// SET_FLAG ( FIRST_VIDEO );
 
 
 	// if (( omx_error = OMX_SetParameter ( ILC_GET_HANDLE ( video_clock ), OMX_IndexConfigTimeCurrentVideoReference, & timestamp )) != OMX_ErrorNone )
@@ -1196,9 +1867,26 @@ int rpi_mp_seek (int64_t position)
 	//  	return 0;
 	// }
 
-	// resume playback
-	// pause_playback ();
+	// clock.eState    		= OMX_TIME_ClockStateWaitingForStartTime;
+	// clock.nOffset			= pts__omx_timestamp (0);
+
+	// if (( omx_error = OMX_SetConfig ( ILC_GET_HANDLE ( video_clock ), OMX_IndexConfigTimeClockState, & clock )) != OMX_ErrorNone )
+	// {
+	// 	fprintf ( stderr, "Could not start clock. Error 0x%08x\n", omx_error );
+	//  	return 0;
+	// }
+
+	SET_FLAG ( FIRST_AUDIO );
+	SET_FLAG ( FIRST_VIDEO );
 	unlock();
+	setup_clock();
+
+	// ilclient_change_component_state (audio_render, OMX_StateExecuting);
+	// ilclient_change_component_state (video_clock, OMX_StateExecuting);
+	// ilclient_change_component_state (video_scheduler, OMX_StateExecuting);
+	// ilclient_change_component_state (egl_render, OMX_StateExecuting);
+	// ilclient_change_component_state (video_decode, OMX_StateExecuting);
+
 	if (ret < 0)
 		fprintf (stderr, "could not seek to position: %llu\n (%d)", position, AVERROR (ret));
 	return ret;
@@ -1207,6 +1895,18 @@ int rpi_mp_seek (int64_t position)
 
 int rpi_mp_init ()
 {
+
+	//get refresh rate of the monitor
+	TV_DISPLAY_STATE_T display_state;
+	memset(&display_state, 0, sizeof(TV_DISPLAY_STATE_T));
+	vc_tv_get_display_state(&display_state);
+	if(display_state.state & ( VC_HDMI_HDMI | VC_HDMI_DVI ))
+		refresh_rate = display_state.display.hdmi.frame_rate;
+	else
+		refresh_rate = display_state.display.sdtv.frame_rate;
+
+	printf("REFRESH RATE: %d\n", refresh_rate );
+
 	av_register_all ();
 	avformat_network_init ();
 	// init IL client lib
@@ -1266,15 +1966,19 @@ int rpi_mp_open (const char* source, int* image_width, int* image_height, int64_
 		{
 			video_stream    = fmt_ctx->streams[video_stream_idx];
 			video_codec_ctx = video_stream->codec;
+			// printf("video_codec_ctx->width: %i\n", video_codec_ctx->width);
+			// printf("video_codec_ctx->height: %i\n", video_codec_ctx->height);
 			if (open_video() == 0)
 			{
 				*image_width  = video_codec_ctx->width;
 				*image_height = video_codec_ctx->height;
 			}
 		}
+
 		// open audio
 		if (open_codec_context (&audio_stream_idx, AVMEDIA_TYPE_AUDIO) == 0)
 		{
+
 			audio_stream    = fmt_ctx->streams[audio_stream_idx];
 			audio_codec_ctx = audio_stream->codec;
 			open_audio ();
@@ -1289,6 +1993,23 @@ int rpi_mp_open (const char* source, int* image_width, int* image_height, int64_
 			ret = 1;
 			goto end;
 		}
+
+
+		video_duration = (video_stream->duration * video_stream->time_base.num * AV_TIME_BASE) / video_stream->time_base.den;
+		printf("VIDEO DURATION: %i\n", video_duration );
+		printf("video_stream->duration: %lli\n", video_stream->duration );
+		printf("video_stream->time_base.num: %i\n", video_stream->time_base.num );
+		printf("video_stream->time_base.den: %i\n", video_stream->time_base.den );
+
+		if (~flags & NO_AUDIO_STREAM)
+		{
+			audio_duration = (audio_stream->duration * audio_stream->time_base.num * AV_TIME_BASE) / audio_stream->time_base.den;
+			printf("AUDIO DURATION: %i\n", audio_duration );
+			printf("audio_stream->duration: %lli\n", audio_stream->duration );
+			printf("audio_stream->time_base.num: %i\n", audio_stream->time_base.num );
+			printf("audio_stream->time_base.den: %i\n", audio_stream->time_base.den );
+		}
+
 
 		*duration = fmt_ctx->duration / AV_TIME_BASE;
 
@@ -1305,7 +2026,7 @@ int rpi_mp_open (const char* source, int* image_width, int* image_height, int64_
 		return 1;
 	}
 	// dump input format
-	av_dump_format (fmt_ctx, 0, source, 0);
+	// av_dump_format (fmt_ctx, 0, source, 0); // TEMP REMOVE
 	// allocate frame for decoding (audio here)
 	if (!(av_frame = av_frame_alloc()))
 	{
@@ -1338,6 +2059,16 @@ void rpi_mp_setup_render_buffer (void *_egl_images[], int *_current_texture, pth
 
 int rpi_mp_start ()
 {
+
+	OMX_TIME_CONFIG_ACTIVEREFCLOCKTYPE reference_clock;
+	OMX_INIT_STRUCTURE(reference_clock);
+	reference_clock.eClock = OMX_TIME_RefClockVideo;
+	if( OMX_SetConfig(ILC_GET_HANDLE(video_clock), OMX_IndexConfigTimeActiveRefClock, &reference_clock) != OMX_ErrorNone)
+		fprintf (stderr, "---------------OMX_IndexConfigTimeActiveRefClock failed.\n");
+	// reference_clock.eClock = OMX_TIME_RefClockNone;
+	// if( OMX_SetConfig(ILC_GET_HANDLE(audio_clock), OMX_IndexConfigTimeActiveRefClock, &reference_clock) != OMX_ErrorNone)
+	// 	fprintf (stderr, "---------------OMX_IndexConfigTimeActiveRefClock failed.\n");
+
 	// start threads
 	pthread_t video_decoding, audio_decoding;
 	pthread_create (&video_decoding, NULL, (void*) &video_decoding_thread, NULL);
@@ -1345,20 +2076,102 @@ int rpi_mp_start ()
 
 	// start clock
 	ilclient_change_component_state (video_clock, OMX_StateExecuting);
+	// ilclient_change_component_state (audio_clock, OMX_StateExecuting);
 
-	// read packets from source
-	while (~flags & STOPPED && (av_read_frame (fmt_ctx, &av_packet) >= 0))
+	while (1)
 	{
-		if (process_packet() != 0)
-			break;
+		// read packets from source
+		while ((~flags & STOPPED) && (~flags & DONE_READING))
+		{
+			if (av_read_frame (fmt_ctx, &av_packet) >= 0)
+			{
+				if (process_packet() != 0)
+				{
+					printf("---------process_packet 0\n");
+					break;
+				}
+			}
+			else
+			{
+				printf("---------done_reading\n");
+				SET_FLAG (DONE_READING);
+				// sleep(10);
+				// rpi_mp_seek (0); // WOW
+			}
+			usleep(10); // TODO: FINDA A BETTER WAY OF REDUCING CPU USAGE
+		}
+
+		ilclient_wait_for_event(egl_render, OMX_EventBufferFlag, 221, 0, 0, 1, ILCLIENT_BUFFER_FLAG_EOS, -1);
+		// printf("------------------------ REMOVE EVENT: %i\n", ilclient_remove_event(egl_render, OMX_EventBufferFlag, 0, 1, 0, 1));
+		SET_FLAG(LAST_FRAME);
+
+		if (flags & LAST_FRAME)
+		{
+			printf("---av_seek_frame---\n");
+			// sleep(1);
+			rpi_mp_seek (0); // WOW
+			// av_seek_frame ( fmt_ctx, -1, 0, AVSEEK_FLAG_FRAME | AVSEEK_FLAG_BACKWARD );
+			UNSET_FLAG (DONE_READING);
+			UNSET_FLAG (LAST_BUFFER);
+			UNSET_FLAG (LAST_FRAME);
+			// usleep(1000000);
+			// setup_clock();
+			// SET_FLAG ( FIRST_AUDIO );
+			// SET_FLAG ( FIRST_VIDEO );
+		}
+		else
+		{
+			usleep(FIFO_SLEEPY_TIME);
+		}
+		// printf("---sleep---\n");
+
+
+	// 	if (~flags & FIRST_VIDEO )rpi_mp_seek(0);
 	}
+
+
+
+	// while (~flags & STOPPED)
+	// {
+	// 	if (av_read_frame (fmt_ctx, &av_packet) < 0 )
+	// 	{
+
+	// 		// av_seek_frame ( fmt_ctx, -1, 0, AVSEEK_FLAG_ANY );
+
+	// 		// OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp;
+	// 		// memset ( & timestamp, 0x0, sizeof ( timestamp ) );
+	// 		// timestamp.nVersion.nVersion 	= OMX_VERSION;
+	// 		// timestamp.nSize 				= sizeof ( OMX_TIME_CONFIG_TIMESTAMPTYPE );
+	// 		// timestamp.nPortIndex			= CLOCK_AUDIO_PORT;
+	// 		// timestamp.nTimestamp 			= AVSEEK_FLAG_ANY
+
+	// 		// if (OMX_SetConfig ( ILC_GET_HANDLE ( video_clock ), OMX_IndexConfigTimeCurrentAudioReference, & timestamp ) != OMX_ErrorNone )
+	// 		// 	fprintf ( stderr, "Could not reset timestamp for clock component.\n");
+
+	// 		av_read_frame (fmt_ctx, &av_packet);
+	// 	}
+	// 	if (process_packet() != 0)
+	// 		break;
+	// }
 	SET_FLAG (DONE_READING);
 	printf ("done reading\n");
+
+
+	// OMX_TIME_CONFIG_SCALETYPE scale;
+	// memset (&scale, 0x0, sizeof (OMX_TIME_CONFIG_SCALETYPE));
+	// scale.nSize 			= sizeof (OMX_TIME_CONFIG_SCALETYPE);
+	// scale.nVersion.nVersion = OMX_VERSION;
+	// scale.xScale 			= (1 << 16);
+
+	// OMX_ERRORTYPE omx_error;
+	// if ((omx_error = OMX_SetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeScale, &scale)) != OMX_ErrorNone)
+	// 	fprintf (stderr, "Could not set scale parameter on video clock. Error 0x%08x\n", omx_error);
+
 
 	// wait for all threads to end
 	pthread_join (video_decoding, NULL);
 	pthread_join (audio_decoding, NULL);
-	SET_FLAG (STOPPED);
+	// SET_FLAG (STOPPED); //TU CIE MAM
 
 	// cleanup
 	printf ("cleaning up... \n");
@@ -1387,10 +2200,8 @@ void rpi_mp_stop ()
 void rpi_mp_pause ()
 {
 	OMX_TIME_CONFIG_SCALETYPE scale;
-	memset (&scale, 0x0, sizeof (OMX_TIME_CONFIG_SCALETYPE));
-	scale.nSize 			= sizeof (OMX_TIME_CONFIG_SCALETYPE);
-	scale.nVersion.nVersion = OMX_VERSION;
-	scale.xScale 			= (flags & PAUSED ? 1 << 16 : 0);
+	OMX_INIT_STRUCTURE(scale);
+	scale.xScale 			= (~flags & PAUSED ? 0 : 1 << 16);
 
 	OMX_ERRORTYPE omx_error;
 	if ((omx_error = OMX_SetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeScale, &scale)) != OMX_ErrorNone)
@@ -1398,33 +2209,154 @@ void rpi_mp_pause ()
 		fprintf (stderr, "Could not set scale parameter on video clock. Error 0x%08x\n", omx_error);
 		return;
 	}
+
+	// if ((omx_error = OMX_SetParameter (ILC_GET_HANDLE (audio_clock), OMX_IndexConfigTimeScale, &scale)) != OMX_ErrorNone)
+	// {
+	// 	fprintf (stderr, "Could not set scale parameter on video clock. Error 0x%08x\n", omx_error);
+	// 	return;
+	// }
+
 	if (~flags & PAUSED)
 	{
 		SET_FLAG (PAUSED);
-		/*
-		//printf ( "waiting for threads to pause...\n" );
-		// make sure threads are paused
-		pthread_mutex_lock ( & video_mutex );
-		while ( ~flags & VIDEO_PAUSED )
-		{
-			//printf ( "  waiting for video thread to set flag\n" );
-			pthread_cond_wait ( & video_cond, & video_mutex );
-			//printf ( "  signal recieved\n" );
-		}
-		pthread_mutex_unlock ( & video_mutex );
-		//printf ( "  video is paused\n" );
 
-		pthread_mutex_lock ( & audio_mutex );
-		while ( ~flags & AUDIO_PAUSED )
-			pthread_cond_wait ( & audio_cond, & audio_mutex );
-		pthread_mutex_unlock ( & audio_mutex );
-		//printf ( "  audio is paused\n" );
-		//*/
+		OMX_ERRORTYPE omx_error;
+
+
+
+
+
+		// OMX_TIME_CONFIG_TIMESTAMPTYPE startTime;
+		// OMX_INIT_STRUCTURE(startTime);
+
+		// startTime.nPortIndex		= CLOCK_AUDIO_PORT;
+		// startTime.nTimestamp		= pts__omx_timestamp (0);
+		// if (( omx_error = OMX_SetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeClientStartTime, &startTime)) != OMX_ErrorNone)
+		// {
+		// 	fprintf (stderr, "Could not get timestamp config from clock component. Error 0x%08x\n", omx_error);
+		// }
+		// else
+		// {
+		// 	uint64_t pts = (uint64_t) (timestamp.nTimestamp.nLowPart | (uint64_t) timestamp.nTimestamp.nHighPart << 32);
+		// 	printf("OMX_IndexConfigTimeCurrentMediaTime AUDIO: %llu\n", pts * 1000000LL / (uint64_t)AV_TIME_BASE);
+		// }
+
+
+
+
+		OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp;
+		OMX_INIT_STRUCTURE(timestamp);
+
+		timestamp.nPortIndex		= CLOCK_AUDIO_PORT;
+		if (( omx_error = OMX_GetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeCurrentMediaTime, &timestamp)) != OMX_ErrorNone)
+		{
+			fprintf (stderr, "Could not get timestamp config from clock component. Error 0x%08x\n", omx_error);
+		}
+		else
+		{
+			uint64_t pts = (uint64_t) (timestamp.nTimestamp.nLowPart | (uint64_t) timestamp.nTimestamp.nHighPart << 32);
+			printf("OMX_IndexConfigTimeCurrentMediaTime AUDIO: %llu\n", pts * 1000000LL / (uint64_t)AV_TIME_BASE);
+		}
+
+		timestamp.nPortIndex		= CLOCK_VIDEO_PORT;
+		if (( omx_error = OMX_GetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeCurrentMediaTime, &timestamp)) != OMX_ErrorNone)
+		{
+			fprintf (stderr, "Could not get timestamp config from clock component. Error 0x%08x\n", omx_error);
+		}
+		else
+		{
+			uint64_t pts = (uint64_t) (timestamp.nTimestamp.nLowPart | (uint64_t) timestamp.nTimestamp.nHighPart << 32);
+			printf("OMX_IndexConfigTimeCurrentMediaTime VIDEO: %llu\n", pts * 1000000LL / (uint64_t)AV_TIME_BASE);
+		}
+
+		// OMX_CONFIG_LATENCYTARGETTYPE latencyTarget;
+		// OMX_INIT_STRUCTURE(latencyTarget);
+		// latencyTarget.nPortIndex	= 100;
+		// latencyTarget.bEnabled		= OMX_TRUE;
+		// latencyTarget.nFilter		= 1;
+		// latencyTarget.nTarget		= 1000000;
+		// latencyTarget.nShift		= 7;
+		// latencyTarget.nSpeedFactor	= 512;
+		// latencyTarget.nInterFactor	= 300;
+		// latencyTarget.nAdjCap		= 100;
+
+
+		// if (OMX_SetParameter ( ILC_GET_HANDLE ( audio_render ), OMX_IndexConfigLatencyTarget, & latencyTarget ) != OMX_ErrorNone )
+		// {
+		// 	printf ("Could not set latency target.\n");
+		// }
+		// if (OMX_GetParameter ( ILC_GET_HANDLE ( audio_render ), OMX_IndexConfigLatencyTarget, & latencyTarget ) != OMX_ErrorNone )
+		// {
+		// 	printf ("Could not get latency target.\n");
+		// }
+		// else
+		// {
+		// 	printf("%i\n",latencyTarget.bEnabled);
+		// 	printf("%u\n",latencyTarget.nFilter);
+		// 	printf("%u\n",latencyTarget.nTarget);
+		// 	printf("%u\n",latencyTarget.nShift);
+		// 	printf("%i\n",latencyTarget.nSpeedFactor);
+		// 	printf("%i\n",latencyTarget.nInterFactor);
+		// 	printf("%i\n",latencyTarget.nAdjCap);
+		// }
+
+
+
+
+		// if (OMX_SetParameter ( ILC_GET_HANDLE ( audio_render ), OMX_IndexConfigLatencyTarget, & latencyTarget ) != OMX_ErrorNone )
+		// {
+		// 	printf ("Could not stop clock.\n");
+		//  	return;
+		// }
+
+		// ilclient_change_component_state (audio_clock, OMX_StatePause);
+		// ilclient_change_component_state (video_clock, OMX_StatePause);
+		// ilclient_change_component_state (audio_render, OMX_StatePause);
+		// ilclient_change_component_state (egl_render, OMX_StatePause);
+		// ilclient_change_component_state (video_scheduler, OMX_StatePause);
+
+		if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( audio_render ), OMX_CommandFlush, AUDIO_RENDER_INPUT_PORT, NULL ) != OMX_ErrorNone ) )
+		{
+			fprintf ( stderr, "Could not flush video decoder input (0x%08x)\n", omx_error );
+		}
+		ilclient_flush_tunnels ( audio_tunnel, 0 );
+
+		avcodec_flush_buffers ( audio_codec_ctx );
+		// flush_buffer ( & audio_packet_fifo );
+
+		printf("PAUSED\n");
+
+		// OMX_TIME_CONFIG_CLOCKSTATETYPE clock;
+		// OMX_INIT_STRUCTURE(clock);
+		// clock.eState    		= OMX_TIME_ClockStateStopped;
+
+		// if (OMX_SetParameter ( ILC_GET_HANDLE ( video_clock ), OMX_IndexConfigTimeClockState, & clock ) != OMX_ErrorNone )
+		// {
+		// 	printf ("Could not stop clock.\n");
+		//  	return;
+		// }
 	}
 	else
 	{
 		UNSET_FLAG (PAUSED);
+		// ilclient_change_component_state (video_scheduler, OMX_StateExecuting);
+		// ilclient_change_component_state (egl_render, OMX_StateExecuting);
+		// ilclient_change_component_state (audio_render, OMX_StateExecuting);
+		// ilclient_change_component_state (video_clock, OMX_StateExecuting);
+		// ilclient_change_component_state (audio_clock, OMX_StateExecuting);
+
 		pthread_cond_broadcast (&pause_condition);
+		printf("PLAYING\n");
+
+		// OMX_TIME_CONFIG_CLOCKSTATETYPE clock;
+		// OMX_INIT_STRUCTURE(clock);
+		// clock.eState    		= OMX_TIME_ClockStateRunning;
+
+		// if (OMX_SetParameter ( ILC_GET_HANDLE ( video_clock ), OMX_IndexConfigTimeClockState, & clock ) != OMX_ErrorNone )
+		// {
+		// 	printf ("Could not start clock.\n");
+		//  	return;
+		// }
 	}
 }
 

@@ -8,4 +8,6 @@ unsigned long time_us (void);
 
 void ts (void);
 
+unsigned long te(void);
+
 void tp (void);

@@ -34,6 +34,11 @@ void ts(void)
 	timer = time_ms();
 }
 
+unsigned long te(void)
+{
+	return time_ms() - timer;
+}
+
 void tp(void)
 {
 	printf("%lu\n",time_ms() - timer);
