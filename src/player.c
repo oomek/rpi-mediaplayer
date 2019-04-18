@@ -229,8 +229,8 @@ static int setup_clock ()
 
 	if (video_stream_idx != AVERROR_STREAM_NOT_FOUND)
 		clock_state.nWaitMask = OMX_CLOCKPORT0;
-	if (audio_stream_idx != AVERROR_STREAM_NOT_FOUND)
-		clock_state.nWaitMask |= OMX_CLOCKPORT1;
+	// if (audio_stream_idx != AVERROR_STREAM_NOT_FOUND)
+	// 	clock_state.nWaitMask |= OMX_CLOCKPORT1;
 
 	if (video_clock != NULL && OMX_SetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeClockState, &clock_state) != OMX_ErrorNone)
 	{
@@ -292,7 +292,10 @@ static void fill_egl_texture_buffer (void* data, COMPONENT_T* c)
 	// int last_frame = omx_egl_buffers[current_buffer]->nTimeStamp.nLowPart == pts__omx_timestamp( video_duration ).nLowPart ? 1 : 0 ;
 	// int last_frame = omx_egl_buffers[current_buffer]->n == pts__omx_timestamp( video_duration ).nLowPart ? 1 : 0 ;
 
-	if ((~flags & STOPPED) && (omx_egl_buffers[current_buffer]->nFlags != 1))
+
+	// TODO: investigate freeze on stop ( when no LOOP finishes gracefuly)
+	// if ((~flags & STOPPED) && (omx_egl_buffers[current_buffer]->nFlags != 1))
+	if (omx_egl_buffers[current_buffer]->nFlags != 1)
 	{
 		delta_time = time_us() - timer;
 		// printf("%lu ", delta_time / 1000);
@@ -539,7 +542,7 @@ printf("IN nBufferCountActual: %d\n", portFormat.nBufferCountActual );
 printf("IN nBufferCountMin: %d\n", portFormat.nBufferCountMin );
 printf("IN nBufferSize: %d\n", portFormat.nBufferSize );
 
-portFormat.nBufferCountActual = 1;
+portFormat.nBufferCountActual = 2;
 portFormat.nBufferSize = 81920;
 OMX_SetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat);
 printf("IN nBufferCountActual: %d\n", portFormat.nBufferCountActual );
@@ -623,10 +626,11 @@ static void video_decoding_thread ()
 {
 	uint8_t *d;
 	int ret;
-	while (1)
+	while (~flags & STOPPED)
 	{
-		while (~flags & STOPPED && (~flags & DONE_READING || video_packet_fifo.n_packets))
+		while ((~flags & DONE_READING) || (video_packet_fifo.n_packets))
 		{
+			printf("-Video_decoding_thread\n");
 			// printf("%d %d\n",flags, video_packet_fifo.n_packets );
 			// check pause
 			if (flags & PAUSED)
@@ -713,238 +717,238 @@ static void video_decoding_thread ()
 	Decode audio packet (using FFMPEG) and send it to hardware for rendering
  *	return int 0 on success, non-zero on failure
  */
-static inline int decode_audio_packet ()
-{
-	int got_frame = 0, ret = 0, data_size = 0;
-	uint8_t *audio_data, *audio_data_p = NULL;
-	// OMX_TICKS ticks = omx_timestamp (audio_packet);
-	int64_t timestamp = int64_timestamp (video_packet);
-	// printf("A: %lli\n", timestamp);
+// static inline int decode_audio_packet ()
+// {
+// 	int got_frame = 0, ret = 0, data_size = 0;
+// 	uint8_t *audio_data, *audio_data_p = NULL;
+// 	// OMX_TICKS ticks = omx_timestamp (audio_packet);
+// 	int64_t timestamp = int64_timestamp (video_packet);
+// 	// printf("A: %lli\n", timestamp);
 
-	// int duration = (audio_packet.duration * audio_stream->time_base.num * AV_TIME_BASE) / audio_stream->time_base.den;
-	// printf("%i %lli\n", duration, timestamp);
+// 	// int duration = (audio_packet.duration * audio_stream->time_base.num * AV_TIME_BASE) / audio_stream->time_base.den;
+// 	// printf("%i %lli\n", duration, timestamp);
 
-	// printf("TICKS A: %d\n", ticks);
-	// printf("audio timestamp: %d\n", ticks.nLowPart);
+// 	// printf("TICKS A: %d\n", ticks);
+// 	// printf("audio timestamp: %d\n", ticks.nLowPart);
 
-	// some audio decoders only decode part of the data
-	// printf("audio_packet.size %d ", audio_packet.size);
-	while (audio_packet.size > 0)
-	{
-		if ((ret = avcodec_decode_audio4 (audio_codec_ctx, av_frame, &got_frame, &audio_packet)) < 0)
-		{
-			fprintf (stderr, "Error decoding audio packet \n");
-			return ret; // we return that it's alright to continue
-		}
-		audio_packet.size -= ret;
-		audio_packet.data += ret;
-		if (got_frame)
-		{
-			if ((data_size = av_samples_get_buffer_size (NULL,
-                                                         audio_codec_ctx->channels,
-                                                         av_frame->nb_samples,
-                                                         audio_codec_ctx->sample_fmt,
-                                                         1)) <= 0)
-			{
-				fprintf (stderr, "Error getting samples buffer size\n");
-				break;
-			}
-			int bps = av_get_bytes_per_sample (audio_codec_ctx->sample_fmt);
+// 	// some audio decoders only decode part of the data
+// 	// printf("audio_packet.size %d ", audio_packet.size);
+// 	while (audio_packet.size > 0)
+// 	{
+// 		if ((ret = avcodec_decode_audio4 (audio_codec_ctx, av_frame, &got_frame, &audio_packet)) < 0)
+// 		{
+// 			fprintf (stderr, "Error decoding audio packet \n");
+// 			return ret; // we return that it's alright to continue
+// 		}
+// 		audio_packet.size -= ret;
+// 		audio_packet.data += ret;
+// 		if (got_frame)
+// 		{
+// 			if ((data_size = av_samples_get_buffer_size (NULL,
+//                                                          audio_codec_ctx->channels,
+//                                                          av_frame->nb_samples,
+//                                                          audio_codec_ctx->sample_fmt,
+//                                                          1)) <= 0)
+// 			{
+// 				fprintf (stderr, "Error getting samples buffer size\n");
+// 				break;
+// 			}
+// 			int bps = av_get_bytes_per_sample (audio_codec_ctx->sample_fmt);
 
-			// interleave data if it is planar
-			if (av_sample_fmt_is_planar (audio_codec_ctx->sample_fmt))
-			{
-				int i, ch;
-				audio_data = (uint8_t *) malloc (data_size);
-				audio_data_p = audio_data;
-				for (i = 0; i < av_frame->nb_samples; i ++)
-					for (ch = 0; ch < audio_codec_ctx->channels; ch ++, audio_data_p += bps)
-						memcpy (audio_data_p, av_frame->data[ch] + i * bps, bps);
-				audio_data_p = audio_data;
-			}
-			else
-				audio_data = av_frame->data[0];
+// 			// interleave data if it is planar
+// 			if (av_sample_fmt_is_planar (audio_codec_ctx->sample_fmt))
+// 			{
+// 				int i, ch;
+// 				audio_data = (uint8_t *) malloc (data_size);
+// 				audio_data_p = audio_data;
+// 				for (i = 0; i < av_frame->nb_samples; i ++)
+// 					for (ch = 0; ch < audio_codec_ctx->channels; ch ++, audio_data_p += bps)
+// 						memcpy (audio_data_p, av_frame->data[ch] + i * bps, bps);
+// 				audio_data_p = audio_data;
+// 			}
+// 			else
+// 				audio_data = av_frame->data[0];
 
-			// if 32-bit we need to resample to 16-bit
-			// (we are assuming it's floating point in this case)
-			if (bps > 2)
-			{
-				uint8_t *tmp = NULL;
-				flt_to_s16 (audio_data, &tmp, data_size);
+// 			// if 32-bit we need to resample to 16-bit
+// 			// (we are assuming it's floating point in this case)
+// 			if (bps > 2)
+// 			{
+// 				uint8_t *tmp = NULL;
+// 				flt_to_s16 (audio_data, &tmp, data_size);
 
-				if (audio_data_p)
-					free (audio_data_p);
+// 				if (audio_data_p)
+// 					free (audio_data_p);
 
-				data_size /= 2;
-				audio_data = audio_data_p = tmp;
-			}
+// 				data_size /= 2;
+// 				audio_data = audio_data_p = tmp;
+// 			}
 
-			// send frame data to audio render
-			while (data_size > 0)
-			{
-				// printf("%d ", data_size);
-				if ((omx_audio_buffer = ilclient_get_input_buffer (audio_render, AUDIO_RENDER_INPUT_PORT, 1)) == NULL)
-				{
-					fprintf ( stderr, "Error getting buffer to audio decoder\n" );
-					return 1; // errors with hardware, stop trying to render audio
-				}
-				omx_audio_buffer->nFilledLen = data_size > omx_audio_buffer->nAllocLen ? omx_audio_buffer->nAllocLen : data_size;
-				omx_audio_buffer->nOffset    = 0;
-				omx_audio_buffer->nFlags	 = 0;
-				// copy data
-				memcpy (omx_audio_buffer->pBuffer, audio_data, omx_audio_buffer->nFilledLen);
-				audio_data += omx_audio_buffer->nFilledLen;
-				data_size  -= omx_audio_buffer->nFilledLen;
+// 			// send frame data to audio render
+// 			while (data_size > 0)
+// 			{
+// 				// printf("%d ", data_size);
+// 				if ((omx_audio_buffer = ilclient_get_input_buffer (audio_render, AUDIO_RENDER_INPUT_PORT, 1)) == NULL)
+// 				{
+// 					fprintf ( stderr, "Error getting buffer to audio decoder\n" );
+// 					return 1; // errors with hardware, stop trying to render audio
+// 				}
+// 				omx_audio_buffer->nFilledLen = data_size > omx_audio_buffer->nAllocLen ? omx_audio_buffer->nAllocLen : data_size;
+// 				omx_audio_buffer->nOffset    = 0;
+// 				omx_audio_buffer->nFlags	 = 0;
+// 				// copy data
+// 				memcpy (omx_audio_buffer->pBuffer, audio_data, omx_audio_buffer->nFilledLen);
+// 				audio_data += omx_audio_buffer->nFilledLen;
+// 				data_size  -= omx_audio_buffer->nFilledLen;
 
-				// first audio packet of stream
-				if (flags & FIRST_AUDIO)
-				{
-					printf("FIRST_AUDIO ---------\n");
-					omx_audio_buffer->nFlags = OMX_BUFFERFLAG_SYNCFRAME | OMX_BUFFERFLAG_STARTTIME | OMX_BUFFERFLAG_DISCONTINUITY;
-					UNSET_FLAG (FIRST_AUDIO)
-				}
-				else
-				{
-					// omx_audio_buffer->nTimeStamp = ticks;
-					if (omx_audio_buffer->nTimeStamp.nLowPart == 0 && omx_audio_buffer->nTimeStamp.nHighPart == 0)
-						omx_audio_buffer->nFlags |= OMX_BUFFERFLAG_TIME_UNKNOWN;
-				}
+// 				// first audio packet of stream
+// 				if (flags & FIRST_AUDIO)
+// 				{
+// 					printf("FIRST_AUDIO ---------\n");
+// 					omx_audio_buffer->nFlags = OMX_BUFFERFLAG_SYNCFRAME | OMX_BUFFERFLAG_STARTTIME | OMX_BUFFERFLAG_DISCONTINUITY;
+// 					UNSET_FLAG (FIRST_AUDIO)
+// 				}
+// 				else
+// 				{
+// 					// omx_audio_buffer->nTimeStamp = ticks;
+// 					if (omx_audio_buffer->nTimeStamp.nLowPart == 0 && omx_audio_buffer->nTimeStamp.nHighPart == 0)
+// 						omx_audio_buffer->nFlags |= OMX_BUFFERFLAG_TIME_UNKNOWN;
+// 				}
 
-				// omx_video_buffer->nTimeStamp = pts__omx_timestamp( timestamp + ((int64_t)video_duration - (int64_t)audio_duration) * (int64_t)repeat_count);
-				// omx_video_buffer->nTimeStamp = pts__omx_timestamp( timestamp - ((int64_t)0) * (int64_t)repeat_count);
-				omx_video_buffer->nTimeStamp = pts__omx_timestamp(timestamp);
-
-
-
-	// OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp_offset;
-	// OMX_INIT_STRUCTURE(timestamp_offset);
-	// timestamp_offset.nPortIndex = AUDIO_RENDER_CLOCK_PORT;
-	// timestamp_offset.nTimestamp = pts__omx_timestamp (0L);
-
-	// if(OMX_SetConfig(ILC_GET_HANDLE (audio_render), OMX_IndexConfigPresentationOffset, &timestamp_offset) != OMX_ErrorNone)
-	// {
-	// 	printf("failed to set audio offset offset\n");
-	// }
+// 				// omx_video_buffer->nTimeStamp = pts__omx_timestamp( timestamp + ((int64_t)video_duration - (int64_t)audio_duration) * (int64_t)repeat_count);
+// 				// omx_video_buffer->nTimeStamp = pts__omx_timestamp( timestamp - ((int64_t)0) * (int64_t)repeat_count);
+// 				omx_video_buffer->nTimeStamp = pts__omx_timestamp(timestamp);
 
 
 
-				// last packet of frame
-				if (data_size == 0 && audio_packet.size == 0)
-					omx_audio_buffer->nFlags |= OMX_BUFFERFLAG_ENDOFFRAME;
-				// empty the buffer for render
-				// ts();
-				if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (audio_render), omx_audio_buffer) != OMX_ErrorNone)
-				{
-					fprintf (stderr, "Error emptying audio render buffer\n");
-					return 1; // errors with hardware, stop trying to render audio
-				}
-				// tp();
-			}
-		}
-	}
+// 	// OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp_offset;
+// 	// OMX_INIT_STRUCTURE(timestamp_offset);
+// 	// timestamp_offset.nPortIndex = AUDIO_RENDER_CLOCK_PORT;
+// 	// timestamp_offset.nTimestamp = pts__omx_timestamp (0L);
 
-	// printf("\n");
-
-	if (audio_data_p)
-		free (audio_data_p);
-	audio_packet.size = 0;
-	audio_packet.data = NULL;
-	return 0;
-}
+// 	// if(OMX_SetConfig(ILC_GET_HANDLE (audio_render), OMX_IndexConfigPresentationOffset, &timestamp_offset) != OMX_ErrorNone)
+// 	// {
+// 	// 	printf("failed to set audio offset offset\n");
+// 	// }
 
 
-static int hardwaredecode_audio_packet ()
-{
-	OMX_TICKS ticks;
-	while (audio_packet.size > 0)
-	{
-		// get buffer handler to audio decoder
-		if ((omx_audio_buffer = ilclient_get_input_buffer (audio_decode, 120, 1)) == NULL)
-		{
-			fprintf (stderr, "Error getting buffer to audio decoder\n");
-			return 1;
-		}
-		// copy data to the buffer
-		omx_audio_buffer->nFilledLen = audio_packet.size < omx_audio_buffer->nAllocLen ? audio_packet.size : omx_audio_buffer->nAllocLen;
-		memcpy (omx_audio_buffer->pBuffer, audio_packet.data, omx_audio_buffer->nFilledLen);
 
-		audio_packet.size -= omx_audio_buffer->nFilledLen;
-		audio_packet.data += omx_audio_buffer->nFilledLen;
+// 				// last packet of frame
+// 				if (data_size == 0 && audio_packet.size == 0)
+// 					omx_audio_buffer->nFlags |= OMX_BUFFERFLAG_ENDOFFRAME;
+// 				// empty the buffer for render
+// 				// ts();
+// 				if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (audio_render), omx_audio_buffer) != OMX_ErrorNone)
+// 				{
+// 					fprintf (stderr, "Error emptying audio render buffer\n");
+// 					return 1; // errors with hardware, stop trying to render audio
+// 				}
+// 				// tp();
+// 			}
+// 		}
+// 	}
 
-		omx_audio_buffer->nOffset = 0;
-		omx_audio_buffer->nFlags  = OMX_BUFFERFLAG_TIME_UNKNOWN;
+// 	// printf("\n");
 
-		// first audio packet
-		if (flags & FIRST_AUDIO)
-		{
-			omx_audio_buffer->nFlags = OMX_BUFFERFLAG_STARTTIME;
-			UNSET_FLAG (FIRST_AUDIO)
-		}
-		ticks.nLowPart  = audio_packet.pts;
-		ticks.nHighPart = audio_packet.pts >> 32;
-		omx_audio_buffer->nTimeStamp = ticks;
-		if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (audio_decode), omx_audio_buffer) != OMX_ErrorNone)
-		{
-			fprintf (stderr, "Error emptying audio render buffer\n");
-			return 1; // errors with hardware, stop trying to render audio
-		}
-	}
-	return 0;
-}
+// 	if (audio_data_p)
+// 		free (audio_data_p);
+// 	audio_packet.size = 0;
+// 	audio_packet.data = NULL;
+// 	return 0;
+// }
+
+
+// static int hardwaredecode_audio_packet ()
+// {
+// 	OMX_TICKS ticks;
+// 	while (audio_packet.size > 0)
+// 	{
+// 		// get buffer handler to audio decoder
+// 		if ((omx_audio_buffer = ilclient_get_input_buffer (audio_decode, 120, 1)) == NULL)
+// 		{
+// 			fprintf (stderr, "Error getting buffer to audio decoder\n");
+// 			return 1;
+// 		}
+// 		// copy data to the buffer
+// 		omx_audio_buffer->nFilledLen = audio_packet.size < omx_audio_buffer->nAllocLen ? audio_packet.size : omx_audio_buffer->nAllocLen;
+// 		memcpy (omx_audio_buffer->pBuffer, audio_packet.data, omx_audio_buffer->nFilledLen);
+
+// 		audio_packet.size -= omx_audio_buffer->nFilledLen;
+// 		audio_packet.data += omx_audio_buffer->nFilledLen;
+
+// 		omx_audio_buffer->nOffset = 0;
+// 		omx_audio_buffer->nFlags  = OMX_BUFFERFLAG_TIME_UNKNOWN;
+
+// 		// first audio packet
+// 		if (flags & FIRST_AUDIO)
+// 		{
+// 			omx_audio_buffer->nFlags = OMX_BUFFERFLAG_STARTTIME;
+// 			UNSET_FLAG (FIRST_AUDIO)
+// 		}
+// 		ticks.nLowPart  = audio_packet.pts;
+// 		ticks.nHighPart = audio_packet.pts >> 32;
+// 		omx_audio_buffer->nTimeStamp = ticks;
+// 		if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (audio_decode), omx_audio_buffer) != OMX_ErrorNone)
+// 		{
+// 			fprintf (stderr, "Error emptying audio render buffer\n");
+// 			return 1; // errors with hardware, stop trying to render audio
+// 		}
+// 	}
+// 	return 0;
+// }
 
 /**
  *  Audio decoding thread.
  *  Polls the audio packet buffer for new packets to decode
  *  and send for playback.
  */
-static void audio_decoding_thread ()
-{
-	// AVPacket tmp_pack;
-	uint8_t *d;
-	int ret;
-	while (1)
-	{
-		while (~flags & STOPPED && ~flags & NO_AUDIO_STREAM)
-		{
-			// printf("audio_packet_fifo.n_packets %d\n", audio_packet_fifo.n_packets);
-			// check if we are done demuxing
-			if (flags & DONE_READING && !audio_packet_fifo.n_packets)
-				break;
-			// paused
-			if (flags & PAUSED)
-			{
-				WAIT_WHILE_PAUSED
-			}
-			// pop a audio packet from the decoding queue
-			pthread_mutex_lock (&audio_mutex);
-			if ((ret = pop_packet (&audio_packet_fifo, &audio_packet)) != 0)
-			{
-				pthread_mutex_unlock (&audio_mutex);
-				usleep (FIFO_SLEEPY_TIME);
-				continue;
-			}
-			// send data for decoding
-			d = audio_packet.data;
-			ret = flags & HARDWARE_DECODE_AUDIO ? hardwaredecode_audio_packet () : decode_audio_packet () ;
-			audio_packet.data = d;
-			pthread_mutex_unlock (&audio_mutex);
+// static void audio_decoding_thread ()
+// {
+// 	// AVPacket tmp_pack;
+// 	uint8_t *d;
+// 	int ret;
+// 	while (0)
+// 	{
+// 		while (~flags & STOPPED && ~flags & NO_AUDIO_STREAM)
+// 		{
+// 			// printf("audio_packet_fifo.n_packets %d\n", audio_packet_fifo.n_packets);
+// 			// check if we are done demuxing
+// 			if (flags & DONE_READING && !audio_packet_fifo.n_packets)
+// 				break;
+// 			// paused
+// 			if (flags & PAUSED)
+// 			{
+// 				WAIT_WHILE_PAUSED
+// 			}
+// 			// pop a audio packet from the decoding queue
+// 			pthread_mutex_lock (&audio_mutex);
+// 			if ((ret = pop_packet (&audio_packet_fifo, &audio_packet)) != 0)
+// 			{
+// 				pthread_mutex_unlock (&audio_mutex);
+// 				usleep (FIFO_SLEEPY_TIME);
+// 				continue;
+// 			}
+// 			// send data for decoding
+// 			d = audio_packet.data;
+// 			ret = flags & HARDWARE_DECODE_AUDIO ? hardwaredecode_audio_packet () : decode_audio_packet () ;
+// 			audio_packet.data = d;
+// 			pthread_mutex_unlock (&audio_mutex);
 
-			// deallocate packet
-			if (ret == 0)
-				av_packet_unref (&audio_packet);
-			else if (ret > 0)
-			{
-				fprintf (stderr, "Error while decoding audio packet, ending thread\n");
-				break;
-			}
-			usleep(10); // TODO better way of handling excessive CPU usage
-		}
-		// printf("FIFO_SLEEPY_TIME AUDIO\n");
-		// usleep(FIFO_SLEEPY_TIME); // TODO better way of handling excessive CPU usage
-		usleep(10); // TODO better way of handling excessive CPU usage
-	}
-	printf ("stopping audio decoding thread\n");
-}
+// 			// deallocate packet
+// 			if (ret == 0)
+// 				av_packet_unref (&audio_packet);
+// 			else if (ret > 0)
+// 			{
+// 				fprintf (stderr, "Error while decoding audio packet, ending thread\n");
+// 				break;
+// 			}
+// 			usleep(10); // TODO better way of handling excessive CPU usage
+// 		}
+// 		// printf("FIFO_SLEEPY_TIME AUDIO\n");
+// 		// usleep(FIFO_SLEEPY_TIME); // TODO better way of handling excessive CPU usage
+// 		usleep(10); // TODO better way of handling excessive CPU usage
+// 	}
+// 	printf ("stopping audio decoding thread\n");
+// }
 
 /**
  *  Takes the current demuxed packet and sorts it to the correct buffer polled
@@ -967,8 +971,8 @@ static inline int process_packet ()
 		buf = &video_packet_fifo;
 	}
 	// current packet is audio
-	else if (av_packet.stream_index == audio_stream_idx)
-		buf = &audio_packet_fifo;
+	// else if (av_packet.stream_index == audio_stream_idx)
+	// 	buf = &audio_packet_fifo;
 	// not interrested
 	else
 		return ret;
@@ -1319,298 +1323,298 @@ static void close_video ()
  *	Open audio
  *	Create audio components and tunnels with their buffers.
  */
-static int open_audio ()
-{
-	printf("OPENING_AUDIO\n");
-	int ret = 0;
-	OMX_ERRORTYPE omx_error;
+// static int open_audio ()
+// {
+// 	printf("OPENING_AUDIO\n");
+// 	int ret = 0;
+// 	OMX_ERRORTYPE omx_error;
 
-	memset (audio_tunnel, 0, sizeof (audio_tunnel));
+// 	memset (audio_tunnel, 0, sizeof (audio_tunnel));
 
-	// create audio render component
-	if (ilclient_create_component (client, &audio_render, "audio_render", ILCLIENT_DISABLE_ALL_PORTS | ILCLIENT_ENABLE_INPUT_BUFFERS) != 0)
-	{
-		fprintf (stderr, "Error creating IL COMPONENT audio render\n");
-		ret = -14;
-	}
-	list[4] = audio_render;
-
-
-	// setup audio decoder parameters
-	// 	this will be used if audio decoding is supported by the hardware
-	OMX_AUDIO_PARAM_PORTFORMATTYPE audio_format;
-	OMX_INIT_STRUCTURE(audio_format);
-	audio_format.nPortIndex 		= 120;
-
-	// check if we can decode audio on hardware
-	switch (audio_codec_ctx->codec_id)
-	{
-		case AV_CODEC_ID_MP2:
-		case AV_CODEC_ID_MP3:
-			audio_format.eEncoding = OMX_AUDIO_CodingMP3;
-		break;
-
-		case AV_CODEC_ID_DTS:
-			audio_format.eEncoding = OMX_AUDIO_CodingDTS;
-			SET_FLAG ( HARDWARE_DECODE_AUDIO )
-		break;
-
-    	case AV_CODEC_ID_AC3:
-    	case AV_CODEC_ID_EAC3:
-			audio_format.eEncoding = OMX_AUDIO_CodingDDP;
-		break;
-
-		default:
-            break;
-	}
-
-	// if the hardware supports the audio encoder we setup new IL components to handle audio decoding
-	if (flags & HARDWARE_DECODE_AUDIO)
-	{
-		printf ("We will be decoding audio on the hardware\n");
-		// create component
-		if (ilclient_create_component (client, &audio_decode, "audio_decode", ILCLIENT_DISABLE_ALL_PORTS | ILCLIENT_ENABLE_INPUT_BUFFERS) != 0)
-		{
-			fprintf (stderr, "Error create IL COMPONENT audio decoder\n");
-			ret = -14;
-		}
-		list[5] = audio_decode;
-
-		// setup tunnels between audio decoder and audio renderer, as well as between clock and renderer
-		set_tunnel (audio_tunnel,     audio_decode,  121, audio_render, 100);
-		set_tunnel (audio_tunnel + 1, video_clock,    81, audio_render, 101);
-
-		// set it to idle, that way we can modify it
-		if (ilclient_change_component_state (audio_decode, OMX_StateIdle) != 0)
-            fprintf (stderr, "error settings audio decoder component to idle\n");
-
-		// set parameters and enable its buffers
-		if ((omx_error = OMX_SetParameter (ILC_GET_HANDLE (audio_decode), OMX_IndexParamAudioPortFormat, &audio_format)) != OMX_ErrorNone ||
-		     ilclient_enable_port_buffers (audio_decode, 120, NULL, NULL, NULL) != 0)
-		{
-			if (omx_error != OMX_ErrorNone)
-				fprintf (stderr, "Error setting parameters for audio decoder. OMX ERROR: 0x%08x\n", omx_error);
-			else
-                fprintf (stderr, "Error enabling port buffers for audio decoder\n");
-
-			return 1;
-		}
-		// now it's ready - set it as executing
-		ilclient_change_component_state (audio_decode, OMX_StateExecuting);
-	}
-	// else we just create a tunnel between the clock and audio renderer
-	else
-        set_tunnel (audio_tunnel, video_clock, 81, audio_render, 101);
-
-	// setup clock tunnel
-	if (ilclient_setup_tunnel (audio_tunnel, 0, 0 ) != 0)
-	{
-		fprintf (stderr, "Error setting up tunnel between clock and audio render.\n");
-		ret = -15;
-		return ret;
-	}
-
-	if (flags & HARDWARE_DECODE_AUDIO)
-		// setup decode tunnel
-		if (ilclient_setup_tunnel (audio_tunnel + 1, 0, 0) != 0)
-		{
-			fprintf (stderr, "Error setting up tunnel between decoder and audio render.\n");
-			ret = -15;
-			return ret;
-		}
-
-	ilclient_change_component_state (audio_render, OMX_StateIdle);
-
-	// set audio destination
-	OMX_CONFIG_BRCMAUDIODESTINATIONTYPE audio_destination;
-	OMX_INIT_STRUCTURE(audio_destination);
-	char* destination_name 			    = flags & ANALOG_AUDIO_OUT ? ANALOG_AUDIO_DESTINATION_NAME : DIGITAL_AUDIO_DESTINATION_NAME;
-	strcpy ((char*) audio_destination.sName, destination_name);
-
-	if ((omx_error = OMX_SetConfig (ILC_GET_HANDLE (audio_render), OMX_IndexConfigBrcmAudioDestination, &audio_destination)) != OMX_ErrorNone)
-	{
-		fprintf (stderr, "Error setting audio destination: 0x%08x\n", omx_error);
-		return 1;
-	}
-	// set the PCM parameters
-	OMX_AUDIO_PARAM_PCMMODETYPE pcm;
-	OMX_INIT_STRUCTURE(pcm);
-	pcm.nPortIndex 			= AUDIO_RENDER_INPUT_PORT;
-	pcm.nChannels 			= OUT_CHANNELS (audio_codec_ctx->channels);
-	pcm.eNumData 			= OMX_NumericalDataSigned;
-	pcm.eEndian 			= OMX_EndianLittle;
-	pcm.nSamplingRate 		= audio_codec_ctx->sample_rate;
-	pcm.bInterleaved 		= OMX_TRUE;
-	pcm.ePCMMode 			= OMX_AUDIO_PCMModeLinear;
-
-	switch (audio_codec_ctx->sample_fmt)
-	{
-		case AV_SAMPLE_FMT_U8:
-		case AV_SAMPLE_FMT_U8P:
-			pcm.nBitPerSample 						= 8;
-			audio_codec_ctx->bits_per_coded_sample 	= 8;
-		break;
-
-		case AV_SAMPLE_FMT_S16:
-		case AV_SAMPLE_FMT_S16P:
-		case AV_SAMPLE_FMT_S32:
-		case AV_SAMPLE_FMT_S32P:
-		default:
-			pcm.nBitPerSample 						= 16;
-			audio_codec_ctx->bits_per_coded_sample 	= 16;
-		break;
-	}
-	// setup channel mapping
-    switch (audio_codec_ctx->channels)
-    {
-        case 1:
-            pcm.eChannelMapping[0] = OMX_AUDIO_ChannelCF;
-        break;
-
-        case 3:
-            pcm.eChannelMapping[2] = OMX_AUDIO_ChannelCF;
-            pcm.eChannelMapping[1] = OMX_AUDIO_ChannelRF;
-            pcm.eChannelMapping[0] = OMX_AUDIO_ChannelLF;
-        break;
-
-        case 8:
-            pcm.eChannelMapping[7] = OMX_AUDIO_ChannelRS;
-        case 7:
-            pcm.eChannelMapping[6] = OMX_AUDIO_ChannelLS;
-        case 6:
-            pcm.eChannelMapping[5] = OMX_AUDIO_ChannelRR;
-        case 5:
-            pcm.eChannelMapping[4] = OMX_AUDIO_ChannelLR;
-        case 4:
-            pcm.eChannelMapping[3] = OMX_AUDIO_ChannelLFE;
-            pcm.eChannelMapping[2] = OMX_AUDIO_ChannelCF;
-        case 2:
-            pcm.eChannelMapping[1] = OMX_AUDIO_ChannelRF;
-            pcm.eChannelMapping[0] = OMX_AUDIO_ChannelLF;
-        break;
-    }
-    // set parameters for the audio renderer
-    if ((omx_error = OMX_SetParameter (ILC_GET_HANDLE (audio_render), OMX_IndexParamAudioPcm, &pcm)) != OMX_ErrorNone)
-    {
-    	fprintf (stderr, "Error setting PCM parameters for audio renderer; error: 0x%08x\n", omx_error);
-    	return 1;
-    }
-
-// get the number/size of buffers
-OMX_PARAM_PORTDEFINITIONTYPE aparam;
-OMX_INIT_STRUCTURE(aparam);
-aparam.nPortIndex = 100;
-
-if (OMX_GetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexParamPortDefinition, &aparam) != OMX_ErrorNone)
-	printf("OMX_GetParameter AUDIO failed.\n");
-else
-{
-	printf("aparam.nBufferSize: %d\n", aparam.nBufferSize);
-	printf("aparam.nBufferCountActual: %d\n", aparam.nBufferCountActual);
-	printf("aparam.nBufferCountMin: %d\n", aparam.nBufferCountMin);
-}
-
-aparam.nBufferSize = 4096;
-aparam.nBufferCountActual = 1;
-
-if (OMX_SetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexParamPortDefinition, &aparam) != OMX_ErrorNone)
-	printf("OMX_SetParameter AUDIO failed.\n");
-
-if (OMX_GetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexParamPortDefinition, &aparam) != OMX_ErrorNone)
-	printf("OMX_GetParameter AUDIO failed.\n");
-else
-{
-	printf("aparam.nBufferSize: %d\n", aparam.nBufferSize);
-	printf("aparam.nBufferCountActual: %d\n", aparam.nBufferCountActual);
-	printf("aparam.nBufferCountMin: %d\n", aparam.nBufferCountMin);
-}
+// 	// create audio render component
+// 	if (ilclient_create_component (client, &audio_render, "audio_render", ILCLIENT_DISABLE_ALL_PORTS | ILCLIENT_ENABLE_INPUT_BUFFERS) != 0)
+// 	{
+// 		fprintf (stderr, "Error creating IL COMPONENT audio render\n");
+// 		ret = -14;
+// 	}
+// 	list[4] = audio_render;
 
 
+// 	// setup audio decoder parameters
+// 	// 	this will be used if audio decoding is supported by the hardware
+// 	OMX_AUDIO_PARAM_PORTFORMATTYPE audio_format;
+// 	OMX_INIT_STRUCTURE(audio_format);
+// 	audio_format.nPortIndex 		= 120;
 
-OMX_CONFIG_BOOLEANTYPE audioClockReference;
-OMX_INIT_STRUCTURE(audioClockReference);
-if (OMX_GetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexConfigBrcmClockReferenceSource, &audioClockReference) != OMX_ErrorNone)
-	printf("OMX_IndexConfigBrcmClockReferenceSource failed.\n");
-else
-	printf("OMX_IndexConfigBrcmClockReferenceSource: %d\n", audioClockReference.bEnabled);
+// 	// check if we can decode audio on hardware
+// 	switch (audio_codec_ctx->codec_id)
+// 	{
+// 		case AV_CODEC_ID_MP2:
+// 		case AV_CODEC_ID_MP3:
+// 			audio_format.eEncoding = OMX_AUDIO_CodingMP3;
+// 		break;
 
-audioClockReference.bEnabled = OMX_FALSE; //default is true
+// 		case AV_CODEC_ID_DTS:
+// 			audio_format.eEncoding = OMX_AUDIO_CodingDTS;
+// 			SET_FLAG ( HARDWARE_DECODE_AUDIO )
+// 		break;
 
-if (OMX_SetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexConfigBrcmClockReferenceSource, &audioClockReference) != OMX_ErrorNone)
-	printf("OMX_IndexConfigBrcmClockReferenceSource failed.\n");
-else
-	printf("OMX_IndexConfigBrcmClockReferenceSource: %d\n", audioClockReference.bEnabled);
+//     	case AV_CODEC_ID_AC3:
+//     	case AV_CODEC_ID_EAC3:
+// 			audio_format.eEncoding = OMX_AUDIO_CodingDDP;
+// 		break;
+
+// 		default:
+//             break;
+// 	}
+
+// 	// if the hardware supports the audio encoder we setup new IL components to handle audio decoding
+// 	if (flags & HARDWARE_DECODE_AUDIO)
+// 	{
+// 		printf ("We will be decoding audio on the hardware\n");
+// 		// create component
+// 		if (ilclient_create_component (client, &audio_decode, "audio_decode", ILCLIENT_DISABLE_ALL_PORTS | ILCLIENT_ENABLE_INPUT_BUFFERS) != 0)
+// 		{
+// 			fprintf (stderr, "Error create IL COMPONENT audio decoder\n");
+// 			ret = -14;
+// 		}
+// 		list[5] = audio_decode;
+
+// 		// setup tunnels between audio decoder and audio renderer, as well as between clock and renderer
+// 		set_tunnel (audio_tunnel,     audio_decode,  121, audio_render, 100);
+// 		set_tunnel (audio_tunnel + 1, video_clock,    81, audio_render, 101);
+
+// 		// set it to idle, that way we can modify it
+// 		if (ilclient_change_component_state (audio_decode, OMX_StateIdle) != 0)
+//             fprintf (stderr, "error settings audio decoder component to idle\n");
+
+// 		// set parameters and enable its buffers
+// 		if ((omx_error = OMX_SetParameter (ILC_GET_HANDLE (audio_decode), OMX_IndexParamAudioPortFormat, &audio_format)) != OMX_ErrorNone ||
+// 		     ilclient_enable_port_buffers (audio_decode, 120, NULL, NULL, NULL) != 0)
+// 		{
+// 			if (omx_error != OMX_ErrorNone)
+// 				fprintf (stderr, "Error setting parameters for audio decoder. OMX ERROR: 0x%08x\n", omx_error);
+// 			else
+//                 fprintf (stderr, "Error enabling port buffers for audio decoder\n");
+
+// 			return 1;
+// 		}
+// 		// now it's ready - set it as executing
+// 		ilclient_change_component_state (audio_decode, OMX_StateExecuting);
+// 	}
+// 	// else we just create a tunnel between the clock and audio renderer
+// 	else
+//         set_tunnel (audio_tunnel, video_clock, 81, audio_render, 101);
+
+// 	// setup clock tunnel
+// 	if (ilclient_setup_tunnel (audio_tunnel, 0, 0 ) != 0)
+// 	{
+// 		fprintf (stderr, "Error setting up tunnel between clock and audio render.\n");
+// 		ret = -15;
+// 		return ret;
+// 	}
+
+// 	if (flags & HARDWARE_DECODE_AUDIO)
+// 		// setup decode tunnel
+// 		if (ilclient_setup_tunnel (audio_tunnel + 1, 0, 0) != 0)
+// 		{
+// 			fprintf (stderr, "Error setting up tunnel between decoder and audio render.\n");
+// 			ret = -15;
+// 			return ret;
+// 		}
+
+// 	ilclient_change_component_state (audio_render, OMX_StateIdle);
+
+// 	// set audio destination
+// 	OMX_CONFIG_BRCMAUDIODESTINATIONTYPE audio_destination;
+// 	OMX_INIT_STRUCTURE(audio_destination);
+// 	char* destination_name 			    = flags & ANALOG_AUDIO_OUT ? ANALOG_AUDIO_DESTINATION_NAME : DIGITAL_AUDIO_DESTINATION_NAME;
+// 	strcpy ((char*) audio_destination.sName, destination_name);
+
+// 	if ((omx_error = OMX_SetConfig (ILC_GET_HANDLE (audio_render), OMX_IndexConfigBrcmAudioDestination, &audio_destination)) != OMX_ErrorNone)
+// 	{
+// 		fprintf (stderr, "Error setting audio destination: 0x%08x\n", omx_error);
+// 		return 1;
+// 	}
+// 	// set the PCM parameters
+// 	OMX_AUDIO_PARAM_PCMMODETYPE pcm;
+// 	OMX_INIT_STRUCTURE(pcm);
+// 	pcm.nPortIndex 			= AUDIO_RENDER_INPUT_PORT;
+// 	pcm.nChannels 			= OUT_CHANNELS (audio_codec_ctx->channels);
+// 	pcm.eNumData 			= OMX_NumericalDataSigned;
+// 	pcm.eEndian 			= OMX_EndianLittle;
+// 	pcm.nSamplingRate 		= audio_codec_ctx->sample_rate;
+// 	pcm.bInterleaved 		= OMX_TRUE;
+// 	pcm.ePCMMode 			= OMX_AUDIO_PCMModeLinear;
+
+// 	switch (audio_codec_ctx->sample_fmt)
+// 	{
+// 		case AV_SAMPLE_FMT_U8:
+// 		case AV_SAMPLE_FMT_U8P:
+// 			pcm.nBitPerSample 						= 8;
+// 			audio_codec_ctx->bits_per_coded_sample 	= 8;
+// 		break;
+
+// 		case AV_SAMPLE_FMT_S16:
+// 		case AV_SAMPLE_FMT_S16P:
+// 		case AV_SAMPLE_FMT_S32:
+// 		case AV_SAMPLE_FMT_S32P:
+// 		default:
+// 			pcm.nBitPerSample 						= 16;
+// 			audio_codec_ctx->bits_per_coded_sample 	= 16;
+// 		break;
+// 	}
+// 	// setup channel mapping
+//     switch (audio_codec_ctx->channels)
+//     {
+//         case 1:
+//             pcm.eChannelMapping[0] = OMX_AUDIO_ChannelCF;
+//         break;
+
+//         case 3:
+//             pcm.eChannelMapping[2] = OMX_AUDIO_ChannelCF;
+//             pcm.eChannelMapping[1] = OMX_AUDIO_ChannelRF;
+//             pcm.eChannelMapping[0] = OMX_AUDIO_ChannelLF;
+//         break;
+
+//         case 8:
+//             pcm.eChannelMapping[7] = OMX_AUDIO_ChannelRS;
+//         case 7:
+//             pcm.eChannelMapping[6] = OMX_AUDIO_ChannelLS;
+//         case 6:
+//             pcm.eChannelMapping[5] = OMX_AUDIO_ChannelRR;
+//         case 5:
+//             pcm.eChannelMapping[4] = OMX_AUDIO_ChannelLR;
+//         case 4:
+//             pcm.eChannelMapping[3] = OMX_AUDIO_ChannelLFE;
+//             pcm.eChannelMapping[2] = OMX_AUDIO_ChannelCF;
+//         case 2:
+//             pcm.eChannelMapping[1] = OMX_AUDIO_ChannelRF;
+//             pcm.eChannelMapping[0] = OMX_AUDIO_ChannelLF;
+//         break;
+//     }
+//     // set parameters for the audio renderer
+//     if ((omx_error = OMX_SetParameter (ILC_GET_HANDLE (audio_render), OMX_IndexParamAudioPcm, &pcm)) != OMX_ErrorNone)
+//     {
+//     	fprintf (stderr, "Error setting PCM parameters for audio renderer; error: 0x%08x\n", omx_error);
+//     	return 1;
+//     }
+
+// // get the number/size of buffers
+// OMX_PARAM_PORTDEFINITIONTYPE aparam;
+// OMX_INIT_STRUCTURE(aparam);
+// aparam.nPortIndex = 100;
+
+// if (OMX_GetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexParamPortDefinition, &aparam) != OMX_ErrorNone)
+// 	printf("OMX_GetParameter AUDIO failed.\n");
+// else
+// {
+// 	printf("aparam.nBufferSize: %d\n", aparam.nBufferSize);
+// 	printf("aparam.nBufferCountActual: %d\n", aparam.nBufferCountActual);
+// 	printf("aparam.nBufferCountMin: %d\n", aparam.nBufferCountMin);
+// }
+
+// aparam.nBufferSize = 4096;
+// aparam.nBufferCountActual = 1;
+
+// if (OMX_SetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexParamPortDefinition, &aparam) != OMX_ErrorNone)
+// 	printf("OMX_SetParameter AUDIO failed.\n");
+
+// if (OMX_GetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexParamPortDefinition, &aparam) != OMX_ErrorNone)
+// 	printf("OMX_GetParameter AUDIO failed.\n");
+// else
+// {
+// 	printf("aparam.nBufferSize: %d\n", aparam.nBufferSize);
+// 	printf("aparam.nBufferCountActual: %d\n", aparam.nBufferCountActual);
+// 	printf("aparam.nBufferCountMin: %d\n", aparam.nBufferCountMin);
+// }
 
 
-// AUDIO VOLUME
-OMX_AUDIO_CONFIG_VOLUMETYPE audioVolume;
-OMX_INIT_STRUCTURE(audioVolume);
-audioVolume.nPortIndex = 100;
-if (OMX_GetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexConfigAudioVolume, &audioVolume) != OMX_ErrorNone)
-	printf("OMX_IndexConfigAudioVolume failed.\n");
-else
-	printf("OMX_IndexConfigAudioVolume: %d\n", audioVolume.sVolume.nValue);
-audioVolume.bLinear = OMX_TRUE;
-audioVolume.sVolume.nValue = 20;
-if (OMX_SetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexConfigAudioVolume, &audioVolume) != OMX_ErrorNone)
-	printf("OMX_IndexConfigAudioVolume failed.\n");
-else
-	printf("OMX_IndexConfigAudioVolume: %d\n", audioVolume.sVolume.nValue);
+
+// OMX_CONFIG_BOOLEANTYPE audioClockReference;
+// OMX_INIT_STRUCTURE(audioClockReference);
+// if (OMX_GetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexConfigBrcmClockReferenceSource, &audioClockReference) != OMX_ErrorNone)
+// 	printf("OMX_IndexConfigBrcmClockReferenceSource failed.\n");
+// else
+// 	printf("OMX_IndexConfigBrcmClockReferenceSource: %d\n", audioClockReference.bEnabled);
+
+// audioClockReference.bEnabled = OMX_FALSE; //default is true
+
+// if (OMX_SetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexConfigBrcmClockReferenceSource, &audioClockReference) != OMX_ErrorNone)
+// 	printf("OMX_IndexConfigBrcmClockReferenceSource failed.\n");
+// else
+// 	printf("OMX_IndexConfigBrcmClockReferenceSource: %d\n", audioClockReference.bEnabled);
 
 
-//audio ports
-OMX_PARAM_PORTDEFINITIONTYPE portFormat;
-OMX_INIT_STRUCTURE(portFormat);
-portFormat.nPortIndex = 100;
-
-OMX_GetParameter(ILC_GET_HANDLE (audio_render), OMX_IndexParamPortDefinition, &portFormat);
-printf("AUD nBufferCountActual: %d\n", portFormat.nBufferCountActual );
-printf("AUD nBufferCountMin: %d\n", portFormat.nBufferCountMin );
-printf("AUD nBufferSize: %d\n", portFormat.nBufferSize );
-
-portFormat.nBufferCountActual = 1;
-portFormat.nBufferSize = 4096;
-
-OMX_SetParameter(ILC_GET_HANDLE (audio_render), OMX_IndexParamPortDefinition, &portFormat);
-printf("AUD nBufferCountActual: %d\n", portFormat.nBufferCountActual );
-printf("AUD nBufferCountMin: %d\n", portFormat.nBufferCountMin );
-printf("AUD nBufferSize: %d\n", portFormat.nBufferSize );
-
-    // change audio renderer state to executing
-    ilclient_enable_port_buffers    (audio_render, AUDIO_RENDER_INPUT_PORT, NULL, NULL, NULL);
-    ilclient_change_component_state (audio_render, OMX_StateExecuting);
-
-	return ret;
-}
+// // AUDIO VOLUME
+// OMX_AUDIO_CONFIG_VOLUMETYPE audioVolume;
+// OMX_INIT_STRUCTURE(audioVolume);
+// audioVolume.nPortIndex = 100;
+// if (OMX_GetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexConfigAudioVolume, &audioVolume) != OMX_ErrorNone)
+// 	printf("OMX_IndexConfigAudioVolume failed.\n");
+// else
+// 	printf("OMX_IndexConfigAudioVolume: %d\n", audioVolume.sVolume.nValue);
+// audioVolume.bLinear = OMX_TRUE;
+// audioVolume.sVolume.nValue = 20;
+// if (OMX_SetParameter(ILC_GET_HANDLE(audio_render), OMX_IndexConfigAudioVolume, &audioVolume) != OMX_ErrorNone)
+// 	printf("OMX_IndexConfigAudioVolume failed.\n");
+// else
+// 	printf("OMX_IndexConfigAudioVolume: %d\n", audioVolume.sVolume.nValue);
 
 
-static void close_audio ()
-{
-	if ((omx_audio_buffer = ilclient_get_input_buffer (audio_render, AUDIO_RENDER_INPUT_PORT, 1)) != NULL)
-	{
-		omx_audio_buffer->nFilledLen = 0;
-		omx_audio_buffer->nFlags 	 = OMX_BUFFERFLAG_EOS | OMX_BUFFERFLAG_TIME_UNKNOWN;
-		if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (audio_render), omx_audio_buffer) != OMX_ErrorNone)
-            fprintf ( stderr, "error emptying last audio buffer =/\n" );
-	}
-	else
-        fprintf (stderr, "Could not send EOS flag to audio renderer\n");
+// //audio ports
+// OMX_PARAM_PORTDEFINITIONTYPE portFormat;
+// OMX_INIT_STRUCTURE(portFormat);
+// portFormat.nPortIndex = 100;
 
-	// wait for EOS from render
-	printf("AUD: Waiting for EOS from render\n");
-	ilclient_wait_for_event (audio_render, OMX_EventBufferFlag, AUDIO_RENDER_INPUT_PORT, 0, OMX_BUFFERFLAG_EOS, 0, ILCLIENT_BUFFER_FLAG_EOS, 10000);
-	// need to flush the tunnel to allow audio_render to disable its input port
-	printf("AUD: Flushing tunnels\n");
-	ilclient_flush_tunnels        (audio_tunnel, 0);
-	printf("AUD: Disabling port buffers\n");
-	ilclient_disable_port_buffers (audio_render, AUDIO_RENDER_INPUT_PORT, NULL, NULL, NULL);
-	ilclient_disable_tunnel       (audio_tunnel);
-	ilclient_teardown_tunnels     (audio_tunnel);
+// OMX_GetParameter(ILC_GET_HANDLE (audio_render), OMX_IndexParamPortDefinition, &portFormat);
+// printf("AUD nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+// printf("AUD nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+// printf("AUD nBufferSize: %d\n", portFormat.nBufferSize );
 
-	if (audio_codec_ctx)
-        avcodec_close (audio_codec_ctx);
-    fprintf (stderr, "AUD: Cleanup completed.\n");
-}
+// portFormat.nBufferCountActual = 1;
+// portFormat.nBufferSize = 4096;
+
+// OMX_SetParameter(ILC_GET_HANDLE (audio_render), OMX_IndexParamPortDefinition, &portFormat);
+// printf("AUD nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+// printf("AUD nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+// printf("AUD nBufferSize: %d\n", portFormat.nBufferSize );
+
+//     // change audio renderer state to executing
+//     ilclient_enable_port_buffers    (audio_render, AUDIO_RENDER_INPUT_PORT, NULL, NULL, NULL);
+//     ilclient_change_component_state (audio_render, OMX_StateExecuting);
+
+// 	return ret;
+// }
+
+
+// static void close_audio ()
+// {
+// 	if ((omx_audio_buffer = ilclient_get_input_buffer (audio_render, AUDIO_RENDER_INPUT_PORT, 1)) != NULL)
+// 	{
+// 		omx_audio_buffer->nFilledLen = 0;
+// 		omx_audio_buffer->nFlags 	 = OMX_BUFFERFLAG_EOS | OMX_BUFFERFLAG_TIME_UNKNOWN;
+// 		if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (audio_render), omx_audio_buffer) != OMX_ErrorNone)
+//             fprintf ( stderr, "error emptying last audio buffer =/\n" );
+// 	}
+// 	else
+//         fprintf (stderr, "Could not send EOS flag to audio renderer\n");
+
+// 	// wait for EOS from render
+// 	printf("AUD: Waiting for EOS from render\n");
+// 	ilclient_wait_for_event (audio_render, OMX_EventBufferFlag, AUDIO_RENDER_INPUT_PORT, 0, OMX_BUFFERFLAG_EOS, 0, ILCLIENT_BUFFER_FLAG_EOS, 10000);
+// 	// need to flush the tunnel to allow audio_render to disable its input port
+// 	printf("AUD: Flushing tunnels\n");
+// 	ilclient_flush_tunnels        (audio_tunnel, 0);
+// 	printf("AUD: Disabling port buffers\n");
+// 	ilclient_disable_port_buffers (audio_render, AUDIO_RENDER_INPUT_PORT, NULL, NULL, NULL);
+// 	ilclient_disable_tunnel       (audio_tunnel);
+// 	ilclient_teardown_tunnels     (audio_tunnel);
+
+// 	if (audio_codec_ctx)
+//         avcodec_close (audio_codec_ctx);
+//     fprintf (stderr, "AUD: Cleanup completed.\n");
+// }
 
 
 static int open_codec_context (int* stream_idx, enum AVMediaType type)
@@ -1682,14 +1686,14 @@ static int create_hw_clock ()
 static void cleanup ()
 {
 	destroy_packet_buffer (&video_packet_fifo);
-	destroy_packet_buffer (&audio_packet_fifo);
+	// destroy_packet_buffer (&audio_packet_fifo);
 
-	printf ("  closing streams\n");
-	if (audio_stream_idx != AVERROR_STREAM_NOT_FOUND)
-	{
-		close_audio ();
-		printf ("     audio closed\n");
-	}
+	// printf ("  closing streams\n");
+	// if (audio_stream_idx != AVERROR_STREAM_NOT_FOUND)
+	// {
+	// 	close_audio ();
+	// 	printf ("     audio closed\n");
+	// }
 	if (video_stream_idx != AVERROR_STREAM_NOT_FOUND)
 	{
 		close_video ();
@@ -1773,19 +1777,19 @@ int rpi_mp_seek (int64_t position)
 	// seek to frame
 	int ret = av_seek_frame ( fmt_ctx, -1, position, AVSEEK_FLAG_FRAME | AVSEEK_FLAG_BACKWARD );
 
-	double t = (double) position * audio_stream->r_frame_rate.num / audio_stream->r_frame_rate.den;
+	// double t = (double) position * audio_stream->r_frame_rate.num / audio_stream->r_frame_rate.den;
 
-	// reset hardware clock
-	OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp;
-	OMX_INIT_STRUCTURE(timestamp);
-	timestamp.nPortIndex			= CLOCK_VIDEO_PORT;
-	timestamp.nTimestamp 			= pts__omx_timestamp (t);
+	// // reset hardware clock
+	// OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp;
+	// OMX_INIT_STRUCTURE(timestamp);
+	// timestamp.nPortIndex			= CLOCK_VIDEO_PORT;
+	// timestamp.nTimestamp 			= pts__omx_timestamp (t);
 
-	if (( omx_error = OMX_SetParameter ( ILC_GET_HANDLE ( video_clock ), OMX_IndexConfigTimeClientStartTime, & timestamp )) != OMX_ErrorNone )
-	{
-		fprintf ( stderr, "Could not set timestamp for clock component. Error 0x%08x\n", omx_error );
-	 	return 0;
-	}
+	// if (( omx_error = OMX_SetParameter ( ILC_GET_HANDLE ( video_clock ), OMX_IndexConfigTimeClientStartTime, & timestamp )) != OMX_ErrorNone )
+	// {
+	// 	fprintf ( stderr, "Could not set timestamp for clock component. Error 0x%08x\n", omx_error );
+	//  	return 0;
+	// }
 
 	// timestamp.nPortIndex			= 80;
 
@@ -1800,7 +1804,7 @@ int rpi_mp_seek (int64_t position)
 
 	// clear fifo queues
 	flush_buffer ( & video_packet_fifo );
-	flush_buffer ( & audio_packet_fifo );
+	// flush_buffer ( & audio_packet_fifo );
 
 	ilclient_flush_tunnels ( video_tunnel, 0 );
 
@@ -1846,15 +1850,15 @@ int rpi_mp_seek (int64_t position)
 
 
 	// flush audio buffer
-	if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( audio_render ), OMX_CommandFlush, AUDIO_RENDER_INPUT_PORT, NULL ) != OMX_ErrorNone ) )
-	{
-		fprintf ( stderr, "Could not flush video decoder input (0x%08x)\n", omx_error );
-		return 1;
-	}
-	ilclient_flush_tunnels ( audio_tunnel, 0 );
+	// if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( audio_render ), OMX_CommandFlush, AUDIO_RENDER_INPUT_PORT, NULL ) != OMX_ErrorNone ) )
+	// {
+	// 	fprintf ( stderr, "Could not flush video decoder input (0x%08x)\n", omx_error );
+	// 	return 1;
+	// }
+	// ilclient_flush_tunnels ( audio_tunnel, 0 );
 
 	avcodec_flush_buffers ( video_codec_ctx );
-	avcodec_flush_buffers ( audio_codec_ctx );
+	// avcodec_flush_buffers ( audio_codec_ctx );
 
 
 
@@ -1876,7 +1880,7 @@ int rpi_mp_seek (int64_t position)
 	//  	return 0;
 	// }
 
-	SET_FLAG ( FIRST_AUDIO );
+	// SET_FLAG ( FIRST_AUDIO );
 	SET_FLAG ( FIRST_VIDEO );
 	unlock();
 	setup_clock();
@@ -1938,7 +1942,7 @@ int rpi_mp_open (const char* source, int* image_width, int* image_height, int64_
 {
 	int ret = 0;
 	flags = FIRST_VIDEO |
-			FIRST_AUDIO |
+			// FIRST_AUDIO |
 			(init_flags & RENDER_VIDEO_TO_TEXTURE ? RENDER_2_TEXTURE : 0) |
 			(init_flags & ANALOG_AUDIO ? ANALOG_AUDIO_OUT : 0);
 
@@ -1976,14 +1980,16 @@ int rpi_mp_open (const char* source, int* image_width, int* image_height, int64_
 		}
 
 		// open audio
-		if (open_codec_context (&audio_stream_idx, AVMEDIA_TYPE_AUDIO) == 0)
-		{
+		// if (open_codec_context (&audio_stream_idx, AVMEDIA_TYPE_AUDIO) == 0)
+		// {
 
-			audio_stream    = fmt_ctx->streams[audio_stream_idx];
-			audio_codec_ctx = audio_stream->codec;
-			open_audio ();
-		}
-		else
+		// 	audio_stream    = fmt_ctx->streams[audio_stream_idx];
+		// 	audio_codec_ctx = audio_stream->codec;
+		// 	open_audio ();
+		// }
+		// else
+		// 	SET_FLAG(NO_AUDIO_STREAM);
+
 			SET_FLAG(NO_AUDIO_STREAM);
 
 		// check that we did get streams
@@ -2070,9 +2076,10 @@ int rpi_mp_start ()
 	// 	fprintf (stderr, "---------------OMX_IndexConfigTimeActiveRefClock failed.\n");
 
 	// start threads
-	pthread_t video_decoding, audio_decoding;
+	pthread_t video_decoding;
+	// pthread_t audio_decoding;
 	pthread_create (&video_decoding, NULL, (void*) &video_decoding_thread, NULL);
-	pthread_create (&audio_decoding, NULL, (void*) &audio_decoding_thread, NULL);
+	// pthread_create (&audio_decoding, NULL, (void*) &audio_decoding_thread, NULL);
 
 	// start clock
 	ilclient_change_component_state (video_clock, OMX_StateExecuting);
@@ -2080,6 +2087,7 @@ int rpi_mp_start ()
 
 	while (1)
 	{
+		printf("-read_packets_thread\n");
 		// read packets from source
 		while ((~flags & STOPPED) && (~flags & DONE_READING))
 		{
@@ -2101,12 +2109,24 @@ int rpi_mp_start ()
 			usleep(10); // TODO: FINDA A BETTER WAY OF REDUCING CPU USAGE
 		}
 
+		printf("-waiting for EOS\n");
 		ilclient_wait_for_event(egl_render, OMX_EventBufferFlag, 221, 0, 0, 1, ILCLIENT_BUFFER_FLAG_EOS, -1);
+		printf("-received EOS\n");
 		// printf("------------------------ REMOVE EVENT: %i\n", ilclient_remove_event(egl_render, OMX_EventBufferFlag, 0, 1, 0, 1));
 		SET_FLAG(LAST_FRAME);
 
+#define LOOP 1
+
+		if (!LOOP || (flags & STOPPED))
+		{
+			printf("---end---\n");
+			break;
+		}
+
 		if (flags & LAST_FRAME)
 		{
+
+
 			printf("---av_seek_frame---\n");
 			// sleep(1);
 			rpi_mp_seek (0); // WOW
@@ -2169,9 +2189,12 @@ int rpi_mp_start ()
 
 
 	// wait for all threads to end
+	SET_FLAG (STOPPED); //TU CIE MAM
+	printf("-waiting for video thread\n");
 	pthread_join (video_decoding, NULL);
-	pthread_join (audio_decoding, NULL);
-	// SET_FLAG (STOPPED); //TU CIE MAM
+	printf("-finished video thread\n");
+	// pthread_join (audio_decoding, NULL);
+
 
 	// cleanup
 	printf ("cleaning up... \n");
@@ -2184,9 +2207,13 @@ int rpi_mp_start ()
 void rpi_mp_stop ()
 {
 	SET_FLAG (STOPPED);
+
 	// make sure to unpause otherwise threads won't exit
 	if (flags & PAUSED)
         rpi_mp_pause();
+
+    SET_FLAG (DONE_READING);
+    flush_buffer ( & video_packet_fifo );
 	// flush video component
 	if (video_stream_idx != AVERROR_STREAM_NOT_FOUND)
 	{
@@ -2247,16 +2274,16 @@ void rpi_mp_pause ()
 		OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp;
 		OMX_INIT_STRUCTURE(timestamp);
 
-		timestamp.nPortIndex		= CLOCK_AUDIO_PORT;
-		if (( omx_error = OMX_GetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeCurrentMediaTime, &timestamp)) != OMX_ErrorNone)
-		{
-			fprintf (stderr, "Could not get timestamp config from clock component. Error 0x%08x\n", omx_error);
-		}
-		else
-		{
-			uint64_t pts = (uint64_t) (timestamp.nTimestamp.nLowPart | (uint64_t) timestamp.nTimestamp.nHighPart << 32);
-			printf("OMX_IndexConfigTimeCurrentMediaTime AUDIO: %llu\n", pts * 1000000LL / (uint64_t)AV_TIME_BASE);
-		}
+		// timestamp.nPortIndex		= CLOCK_AUDIO_PORT;
+		// if (( omx_error = OMX_GetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeCurrentMediaTime, &timestamp)) != OMX_ErrorNone)
+		// {
+		// 	fprintf (stderr, "Could not get timestamp config from clock component. Error 0x%08x\n", omx_error);
+		// }
+		// else
+		// {
+		// 	uint64_t pts = (uint64_t) (timestamp.nTimestamp.nLowPart | (uint64_t) timestamp.nTimestamp.nHighPart << 32);
+		// 	printf("OMX_IndexConfigTimeCurrentMediaTime AUDIO: %llu\n", pts * 1000000LL / (uint64_t)AV_TIME_BASE);
+		// }
 
 		timestamp.nPortIndex		= CLOCK_VIDEO_PORT;
 		if (( omx_error = OMX_GetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeCurrentMediaTime, &timestamp)) != OMX_ErrorNone)
@@ -2315,13 +2342,13 @@ void rpi_mp_pause ()
 		// ilclient_change_component_state (egl_render, OMX_StatePause);
 		// ilclient_change_component_state (video_scheduler, OMX_StatePause);
 
-		if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( audio_render ), OMX_CommandFlush, AUDIO_RENDER_INPUT_PORT, NULL ) != OMX_ErrorNone ) )
-		{
-			fprintf ( stderr, "Could not flush video decoder input (0x%08x)\n", omx_error );
-		}
-		ilclient_flush_tunnels ( audio_tunnel, 0 );
+		// if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( audio_render ), OMX_CommandFlush, AUDIO_RENDER_INPUT_PORT, NULL ) != OMX_ErrorNone ) )
+		// {
+		// 	fprintf ( stderr, "Could not flush video decoder input (0x%08x)\n", omx_error );
+		// }
+		// ilclient_flush_tunnels ( audio_tunnel, 0 );
 
-		avcodec_flush_buffers ( audio_codec_ctx );
+		// avcodec_flush_buffers ( audio_codec_ctx );
 		// flush_buffer ( & audio_packet_fifo );
 
 		printf("PAUSED\n");
