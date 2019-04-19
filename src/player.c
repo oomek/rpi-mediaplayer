@@ -525,7 +525,7 @@ static inline int decode_video_packet ()
 			printf("IN nBufferCountMin: %d\n", portFormat.nBufferCountMin );
 			printf("IN nBufferSize: %d\n", portFormat.nBufferSize );
 
-			portFormat.nBufferCountActual = 2;
+			portFormat.nBufferCountActual = 1;
 			portFormat.nBufferSize = 81920;
 			OMX_SetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat);
 			printf("IN nBufferCountActual: %d\n", portFormat.nBufferCountActual );
@@ -2148,6 +2148,8 @@ void rpi_mp_stop ()
 
     SET_FLAG (DONE_READING);
     flush_buffer ( & video_packet_fifo );
+    // ilclient_flush_tunnels ( video_tunnel, 0 );
+    // avcodec_flush_buffers ( video_codec_ctx );
 	// flush video component
 	if (video_stream_idx != AVERROR_STREAM_NOT_FOUND)
 	{
@@ -2155,6 +2157,15 @@ void rpi_mp_stop ()
 		if ((omx_error = OMX_SendCommand (ILC_GET_HANDLE (video_decode), OMX_CommandFlush, 130, NULL) != OMX_ErrorNone))
 			fprintf (stderr, "Could not flush video decoder input (0x%08x)\n", omx_error);
 	}
+	// if ((omx_video_buffer = ilclient_get_input_buffer (video_decode, VIDEO_DECODE_INPUT_PORT, 1)) != NULL)
+	// {
+	// 	omx_video_buffer->nFilledLen = 0;
+	// 	omx_video_buffer->nFlags 	 =  OMX_BUFFERFLAG_SYNCFRAME | OMX_BUFFERFLAG_EOS | OMX_BUFFERFLAG_DISCONTINUITY;
+	// 	if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (video_decode), omx_video_buffer) != OMX_ErrorNone)
+	//         printf ("error sending EOS\n");
+	// }
+
+
 }
 
 
