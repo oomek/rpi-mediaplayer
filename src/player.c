@@ -84,7 +84,7 @@ static COMPONENT_T          * video_decode    = NULL,
                             * egl_render      = NULL;
 
 static TUNNEL_T               video_tunnel[4];
-static COMPONENT_T          * list[4];
+static COMPONENT_T          * list[5]; // last component must be NULL
 static ILCLIENT_T           * client;
 
 static OMX_BUFFERHEADERTYPE * omx_video_buffer,
@@ -1650,7 +1650,10 @@ static void cleanup ()
 	av_frame_free (&av_frame);
 	avformat_close_input (&fmt_ctx);
 
-	printf ("  cleaning up components\n");
+	printf ("  cleaning up %i components\n", sizeof(list)/sizeof(list[0]) );
+	// for ( int i = 0; i < sizeof(list)/sizeof(list[0]); i++)
+	// 	printf("%p\n", list[i]);
+
 	ilclient_state_transition   (list, OMX_StateIdle);
 	printf ("  OMX_StateIdle OK\n");
 	// ilclient_state_transition   (list, OMX_StateLoaded);
