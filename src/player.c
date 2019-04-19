@@ -12,8 +12,8 @@
 #include "rpi_mp_utils.h"
 
 #define FIFO_SLEEPY_TIME               10000
-#define DIGITAL_AUDIO_DESTINATION_NAME "hdmi"
-#define ANALOG_AUDIO_DESTINATION_NAME  "local"
+// #define DIGITAL_AUDIO_DESTINATION_NAME "hdmi"
+// #define ANALOG_AUDIO_DESTINATION_NAME  "local"
 
 
 /* OMX Component ports --------------------- */
@@ -27,10 +27,10 @@ enum omxports
 	VIDEO_SCHEDULER_CLOCK_PORT  =  12,
 	EGL_RENDER_INPUT_PORT       = 220,
 	EGL_RENDER_OUT_PORT         = 221,
-	AUDIO_RENDER_INPUT_PORT     = 100,
-	AUDIO_RENDER_CLOCK_PORT     = 101,
+	// AUDIO_RENDER_INPUT_PORT     = 100,
+	// AUDIO_RENDER_CLOCK_PORT     = 101,
 	CLOCK_VIDEO_PORT            =  80,
-	CLOCK_AUDIO_PORT            =  80
+	// CLOCK_AUDIO_PORT            =  80
 };
 
 /* FLAGS ----------------------------------- */
@@ -43,11 +43,11 @@ enum flags
 	PORT_SETTINGS_CHANGED = 0x0010,
 	HARDWARE_DECODE_AUDIO = 0x0020,
 	DONE_READING          = 0x0040,
-	RENDER_2_TEXTURE      = 0x0080,
+	// RENDER_2_TEXTURE      = 0x0080,
 	VIDEO_STOPPED         = 0x0100,
-	AUDIO_STOPPED         = 0x0200,
-	ANALOG_AUDIO_OUT      = 0x0400,
-	NO_AUDIO_STREAM       = 0x0800,
+	// AUDIO_STOPPED         = 0x0200,
+	// ANALOG_AUDIO_OUT      = 0x0400,
+	// NO_AUDIO_STREAM       = 0x0800,
 	LAST_BUFFER           = 0x1000,
 	LAST_FRAME            = 0x2000,
 	CLOCK_PAUSED          = 0x4000,
@@ -70,34 +70,24 @@ enum flags
 
 // Demuxing variables (ffmpeg)
 static AVFormatContext      * fmt_ctx          = NULL;
-static AVCodecContext       * video_codec_ctx  = NULL,
-                            * audio_codec_ctx  = NULL;
-static AVStream             * video_stream     = NULL,
-                            * audio_stream     = NULL;
-static int                    video_stream_idx =   -1,
-                              audio_stream_idx =   -1;
+static AVCodecContext       * video_codec_ctx  = NULL;
+static AVStream             * video_stream     = NULL;
+static int                    video_stream_idx =   -1;
 static AVPacket               av_packet,
-                              video_packet,
-                              audio_packet;
+                              video_packet;
 static AVFrame              * av_frame;
 
 // Decoding variables (OMX)
 static COMPONENT_T          * video_decode    = NULL,
                             * video_scheduler = NULL,
-                            * video_render    = NULL,
                             * video_clock     = NULL,
-                            * audio_clock     = NULL,
-                            * audio_decode    = NULL,
-                            * audio_render    = NULL,
                             * egl_render      = NULL;
 
 static TUNNEL_T               video_tunnel[4];
-static TUNNEL_T               audio_tunnel[3];
-static COMPONENT_T          * list[8];
+static COMPONENT_T          * list[4];
 static ILCLIENT_T           * client;
 
 static OMX_BUFFERHEADERTYPE * omx_video_buffer,
-                            * omx_audio_buffer,
                             * omx_egl_buffers[BUFFER_COUNT];
 
 static void                 * egl_images[BUFFER_COUNT];
@@ -106,16 +96,15 @@ static int32_t                flags     =  0;
 static unsigned int           refresh_rate = 0;
 // static int                    repeat_count = 0;
 static int                    video_duration = 0;
-static int                    audio_duration = 0;
 
 // Helpers
-static packet_buffer video_packet_fifo, audio_packet_fifo;
+static packet_buffer video_packet_fifo;
 
 // Thread variables
 static pthread_mutex_t flags_mutex        = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t pause_mutex        = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t video_mutex        = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t audio_mutex        = PTHREAD_MUTEX_INITIALIZER;
+// static pthread_mutex_t audio_mutex        = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  pause_condition    = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t buffer_filled_mut  = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  buffer_filled_cond = PTHREAD_COND_INITIALIZER;
@@ -190,7 +179,6 @@ static inline int64_t int64_timestamp_fix (AVPacket p)
 static inline void lock ()
 {
 	pthread_mutex_lock (&video_mutex);
-	pthread_mutex_lock (&audio_mutex);
 }
 
 /**
@@ -199,7 +187,6 @@ static inline void lock ()
 static inline void unlock ()
 {
 	pthread_mutex_unlock (&video_mutex);
-	pthread_mutex_unlock (&audio_mutex);
 }
 
 // static void vsync_offset( int offs ) // not used at the moment
@@ -229,8 +216,6 @@ static int setup_clock ()
 
 	if (video_stream_idx != AVERROR_STREAM_NOT_FOUND)
 		clock_state.nWaitMask = OMX_CLOCKPORT0;
-	// if (audio_stream_idx != AVERROR_STREAM_NOT_FOUND)
-	// 	clock_state.nWaitMask |= OMX_CLOCKPORT1;
 
 	if (video_clock != NULL && OMX_SetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeClockState, &clock_state) != OMX_ErrorNone)
 	{
@@ -503,106 +488,98 @@ static inline int decode_video_packet ()
 				fprintf (stderr, "Error setting up tunnel between video scheduler and render\n");
 				return 1;
 			}
-			// if we are rendering to texture we need to some setup to the egl component
-			if (flags & RENDER_2_TEXTURE)
+
+			ilclient_change_component_state (egl_render, OMX_StateIdle);
+			// Enable the output port and tell egl_render to use the texture as a buffer
+			//ilclient_enable_port(egl_render, 221); THIS BLOCKS SO CANT BE USED
+			if (OMX_SendCommand (ILC_GET_HANDLE (egl_render), OMX_CommandPortEnable, EGL_RENDER_OUT_PORT, NULL) != OMX_ErrorNone)
 			{
-				ilclient_change_component_state (egl_render, OMX_StateIdle);
-				// Enable the output port and tell egl_render to use the texture as a buffer
-				//ilclient_enable_port(egl_render, 221); THIS BLOCKS SO CANT BE USED
-				if (OMX_SendCommand (ILC_GET_HANDLE (egl_render), OMX_CommandPortEnable, EGL_RENDER_OUT_PORT, NULL) != OMX_ErrorNone)
+				fprintf (stderr, "OMX_CommandPortEnable failed.\n");
+				return 1;
+			}
+			for ( int i = 0; i < BUFFER_COUNT; i++)
+			{
+				if (OMX_UseEGLImage (ILC_GET_HANDLE (egl_render), &omx_egl_buffers[i], EGL_RENDER_OUT_PORT, NULL, egl_images[i]) != OMX_ErrorNone)
 				{
-					fprintf (stderr, "OMX_CommandPortEnable failed.\n");
-					return 1;
-				}
-				for ( int i = 0; i < BUFFER_COUNT; i++)
-				{
-					if (OMX_UseEGLImage (ILC_GET_HANDLE (egl_render), &omx_egl_buffers[i], EGL_RENDER_OUT_PORT, NULL, egl_images[i]) != OMX_ErrorNone)
-					{
-						fprintf (stderr, "OMX_UseEGLImage failed.\n");
-						return 1;
-					}
-				}
-
-// OMX_PARAM_PORTDEFINITIONTYPE portFormat;
-// OMX_INIT_STRUCTURE(portFormat);
-// portFormat.nPortIndex = EGL_RENDER_OUT_PORT;
-
-// OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
-
-// printf("nBufferCountActual: %d\n", portFormat.nBufferCountActual );
-// printf("nBufferCountMin: %d\n", portFormat.nBufferCountMin );
-// printf("nBufferSize: %d\n", portFormat.nBufferSize );
-
-OMX_PARAM_PORTDEFINITIONTYPE portFormat;
-OMX_INIT_STRUCTURE(portFormat);
-portFormat.nPortIndex = VIDEO_DECODE_INPUT_PORT;
-
-OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat);
-printf("IN nBufferCountActual: %d\n", portFormat.nBufferCountActual );
-printf("IN nBufferCountMin: %d\n", portFormat.nBufferCountMin );
-printf("IN nBufferSize: %d\n", portFormat.nBufferSize );
-
-portFormat.nBufferCountActual = 2;
-portFormat.nBufferSize = 81920;
-OMX_SetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat);
-printf("IN nBufferCountActual: %d\n", portFormat.nBufferCountActual );
-printf("IN nBufferCountMin: %d\n", portFormat.nBufferCountMin );
-printf("IN nBufferSize: %d\n", portFormat.nBufferSize );
-
-
-OMX_PARAM_PORTDEFINITIONTYPE portFormat2;
-OMX_INIT_STRUCTURE(portFormat2);
-portFormat2.nPortIndex = VIDEO_DECODE_OUT_PORT;
-
-
-OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat2);
-printf("OUT nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
-printf("OUT nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
-printf("OUT nBufferSize: %d\n", portFormat2.nBufferSize );
-
-
-// not sure if this is what I want, egl_render discard ?
-// OMX_CONFIG_BUFFERSTALLTYPE stallDelay;
-// OMX_INIT_STRUCTURE(stallDelay);
-// stallDelay.nPortIndex = VIDEO_DECODE_OUT_PORT;
-// if(OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexConfigBufferStall, &stallDelay) != OMX_ErrorNone)
-// stallDelay.nDelay = 50000;
-// if(OMX_SetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexConfigBufferStall, &stallDelay) != OMX_ErrorNone)
-// 	printf ("OMX_IndexConfigBufferStall Set failed.\n");
-// if(OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexConfigBufferStall, &stallDelay) != OMX_ErrorNone)
-// 	printf ("OMX_IndexConfigBufferStall Get failed.\n");
-// printf("OMX_IndexConfigBufferStall: %d\n", stallDelay.nDelay );
-
-
-
-
-// portFormat2.nBufferCountActual = 2;
-// portFormat2.nBufferSize = 81920;
-// OMX_SetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat2);
-// printf("OUT nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
-// printf("OUT nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
-// printf("OUT nBufferSize: %d\n", portFormat2.nBufferSize );
-
-
-
-
-				// Set egl_render to executing
-				ilclient_change_component_state (egl_render, OMX_StateExecuting);
-				// Request egl_render to write data to the texture buffer
-				// *current_texture = (*current_texture + 1) % BUFFER_COUNT;
-				if (OMX_FillThisBuffer (ILC_GET_HANDLE (egl_render), omx_egl_buffers[current_buffer]) != OMX_ErrorNone)
-				{
-					fprintf (stderr, "OMX_FillThisBuffer failed for egl buffer.\n");
+					fprintf (stderr, "OMX_UseEGLImage failed.\n");
 					return 1;
 				}
 			}
-			// if we are not rendering to texture we just need to change the video renderer to excecuting
-			else
-				ilclient_change_component_state (video_render, OMX_StateExecuting);
+
+			// OMX_PARAM_PORTDEFINITIONTYPE portFormat;
+			// OMX_INIT_STRUCTURE(portFormat);
+			// portFormat.nPortIndex = EGL_RENDER_OUT_PORT;
+
+			// OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+
+			// printf("nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+			// printf("nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+			// printf("nBufferSize: %d\n", portFormat.nBufferSize );
+
+			OMX_PARAM_PORTDEFINITIONTYPE portFormat;
+			OMX_INIT_STRUCTURE(portFormat);
+			portFormat.nPortIndex = VIDEO_DECODE_INPUT_PORT;
+
+			OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat);
+			printf("IN nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+			printf("IN nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+			printf("IN nBufferSize: %d\n", portFormat.nBufferSize );
+
+			portFormat.nBufferCountActual = 2;
+			portFormat.nBufferSize = 81920;
+			OMX_SetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat);
+			printf("IN nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+			printf("IN nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+			printf("IN nBufferSize: %d\n", portFormat.nBufferSize );
+
+
+			OMX_PARAM_PORTDEFINITIONTYPE portFormat2;
+			OMX_INIT_STRUCTURE(portFormat2);
+			portFormat2.nPortIndex = VIDEO_DECODE_OUT_PORT;
+
+
+			OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat2);
+			printf("OUT nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
+			printf("OUT nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
+			printf("OUT nBufferSize: %d\n", portFormat2.nBufferSize );
+
+
+			// not sure if this is what I want, egl_render discard ?
+			// OMX_CONFIG_BUFFERSTALLTYPE stallDelay;
+			// OMX_INIT_STRUCTURE(stallDelay);
+			// stallDelay.nPortIndex = VIDEO_DECODE_OUT_PORT;
+			// if(OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexConfigBufferStall, &stallDelay) != OMX_ErrorNone)
+			// stallDelay.nDelay = 50000;
+			// if(OMX_SetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexConfigBufferStall, &stallDelay) != OMX_ErrorNone)
+			// 	printf ("OMX_IndexConfigBufferStall Set failed.\n");
+			// if(OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexConfigBufferStall, &stallDelay) != OMX_ErrorNone)
+			// 	printf ("OMX_IndexConfigBufferStall Get failed.\n");
+			// printf("OMX_IndexConfigBufferStall: %d\n", stallDelay.nDelay );
+
+
+
+
+			// portFormat2.nBufferCountActual = 2;
+			// portFormat2.nBufferSize = 81920;
+			// OMX_SetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat2);
+			// printf("OUT nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
+			// printf("OUT nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
+			// printf("OUT nBufferSize: %d\n", portFormat2.nBufferSize );
+
+
+
+
+			// Set egl_render to executing
+			ilclient_change_component_state (egl_render, OMX_StateExecuting);
+			// Request egl_render to write data to the texture buffer
+			// *current_texture = (*current_texture + 1) % BUFFER_COUNT;
+			if (OMX_FillThisBuffer (ILC_GET_HANDLE (egl_render), omx_egl_buffers[current_buffer]) != OMX_ErrorNone)
+			{
+				fprintf (stderr, "OMX_FillThisBuffer failed for egl buffer.\n");
+				return 1;
+			}
 		}
-		// usleep(16666 * 0.25);
-		// empty buffer
-		// if (got_video_frame == 0)
+
 		if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (video_decode), omx_video_buffer) != OMX_ErrorNone)
 		{
 			fprintf (stderr, "Error emptying video decode buffer\n");
@@ -1001,7 +978,7 @@ static inline int process_packet ()
 static int open_video ()
 {
 	int ret = 0;
-	int render_input_port = VIDEO_RENDER_INPUT_PORT;
+	// int render_input_port = VIDEO_RENDER_INPUT_PORT;
 
 	memset (video_tunnel, 0, sizeof (video_tunnel));
 	// create video decode component
@@ -1077,59 +1054,44 @@ static int open_video ()
 // 	printf("OMX_IndexParamBrcmVideoTimestampFifo: %d\n", reorderTimestamps.bEnabled);
 
 
-	// create the render component which is either a video_render (the display) or egl_render (texture)
-	if (flags & RENDER_2_TEXTURE)
+	// create egl_render component
+	if (ilclient_create_component (client, &egl_render, "egl_render", ILCLIENT_DISABLE_ALL_PORTS | ILCLIENT_ENABLE_OUTPUT_BUFFERS) != 0)
 	{
-		// ilclient_set_fill_buffer_done_callback (client, fill_egl_texture_buffer, 0);
-		// create egl_render component
-		if (ilclient_create_component (client, &egl_render, "egl_render", ILCLIENT_DISABLE_ALL_PORTS | ILCLIENT_ENABLE_OUTPUT_BUFFERS) != 0)
-		{
-			fprintf (stderr, "Error creating IL COMPONENT egl render\n");
-			ret = -14;
-		}
-		list[1] = egl_render;
-		render_input_port = EGL_RENDER_INPUT_PORT;
-
-
-// set nBufferCountActual to allow binding 2 textures
-OMX_PARAM_PORTDEFINITIONTYPE portFormat;
-OMX_INIT_STRUCTURE(portFormat);
-portFormat.nPortIndex = EGL_RENDER_OUT_PORT;
-OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
-portFormat.nBufferCountActual = BUFFER_COUNT;
-OMX_SetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
-
-portFormat.nPortIndex = EGL_RENDER_INPUT_PORT;
-OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
-portFormat.nBufferCountActual = 1;
-OMX_SetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
-
-
-OMX_CONFIG_PORTBOOLEANTYPE discardMode;
-OMX_INIT_STRUCTURE(discardMode);
-discardMode.nPortIndex = 220;
-if (OMX_GetParameter(ILC_GET_HANDLE(egl_render), OMX_IndexParamBrcmVideoEGLRenderDiscardMode, &discardMode) != OMX_ErrorNone)
-	printf("OMX_IndexParamBrcmVideoEGLRenderDiscardMode failed.\n");
-else
-	printf("OMX_IndexParamBrcmVideoEGLRenderDiscardMode: %u\n", discardMode.bEnabled);
-discardMode.bEnabled = OMX_TRUE;
-if (OMX_SetParameter(ILC_GET_HANDLE(egl_render), OMX_IndexParamBrcmVideoEGLRenderDiscardMode, &discardMode) != OMX_ErrorNone)
-	printf("OMX_IndexParamBrcmVideoEGLRenderDiscardMode failed.\n");
-else
-	printf("OMX_IndexParamBrcmVideoEGLRenderDiscardMode: %u\n", discardMode.bEnabled);
-
-
+		fprintf (stderr, "Error creating IL COMPONENT egl render\n");
+		ret = -14;
 	}
+	list[1] = egl_render;
+	// render_input_port = EGL_RENDER_INPUT_PORT;
+
+
+	// set nBufferCountActual to allow binding 2 textures
+	OMX_PARAM_PORTDEFINITIONTYPE portFormat;
+	OMX_INIT_STRUCTURE(portFormat);
+	portFormat.nPortIndex = EGL_RENDER_OUT_PORT;
+	OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+	portFormat.nBufferCountActual = BUFFER_COUNT;
+	OMX_SetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+
+	portFormat.nPortIndex = EGL_RENDER_INPUT_PORT;
+	OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+	portFormat.nBufferCountActual = 1;
+	OMX_SetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+
+
+	OMX_CONFIG_PORTBOOLEANTYPE discardMode;
+	OMX_INIT_STRUCTURE(discardMode);
+	discardMode.nPortIndex = 220;
+	if (OMX_GetParameter(ILC_GET_HANDLE(egl_render), OMX_IndexParamBrcmVideoEGLRenderDiscardMode, &discardMode) != OMX_ErrorNone)
+		printf("OMX_IndexParamBrcmVideoEGLRenderDiscardMode failed.\n");
 	else
-	{
-		// create video render component
-		if (ilclient_create_component (client, &video_render, "video_render", ILCLIENT_DISABLE_ALL_PORTS) != 0)
-		{
-			fprintf (stderr, "Error creating IL COMPONENT video render\n");
-			ret = -14;
-		}
-		list[1] = video_render;
-	}
+		printf("OMX_IndexParamBrcmVideoEGLRenderDiscardMode: %u\n", discardMode.bEnabled);
+	discardMode.bEnabled = OMX_TRUE;
+	if (OMX_SetParameter(ILC_GET_HANDLE(egl_render), OMX_IndexParamBrcmVideoEGLRenderDiscardMode, &discardMode) != OMX_ErrorNone)
+		printf("OMX_IndexParamBrcmVideoEGLRenderDiscardMode failed.\n");
+	else
+		printf("OMX_IndexParamBrcmVideoEGLRenderDiscardMode: %u\n", discardMode.bEnabled);
+
+
 	// create video scheduler
 	if (ilclient_create_component (client, &video_scheduler, "video_scheduler", ILCLIENT_DISABLE_ALL_PORTS) != 0)
 	{
@@ -1137,57 +1099,41 @@ else
 		ret = -13;
 	}
 
+	//scheduler buffer
+	OMX_PARAM_PORTDEFINITIONTYPE portFormat2;
+	OMX_INIT_STRUCTURE(portFormat2);
+
+	portFormat2.nPortIndex = 10;
+	portFormat2.nBufferCountActual = 1;
+	OMX_SetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat2);
+	OMX_GetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat2);
+	printf("SHD IN nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
+	printf("SHD IN nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
+	printf("SHD IN nBufferSize: %d\n", portFormat2.nBufferSize );
+
+	portFormat2.nPortIndex = 11;
+	portFormat2.nBufferCountActual = 1;
+	OMX_SetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat2);
+	OMX_GetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat2);
+	printf("SHD OUT nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
+	printf("SHD OUT nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
+	printf("SHD OUT nBufferSize: %d\n", portFormat2.nBufferSize );
 
 
 
+	portFormat2.nPortIndex = 220;
 
-//scheduler buffer
-OMX_PARAM_PORTDEFINITIONTYPE portFormat;
-OMX_INIT_STRUCTURE(portFormat);
+	OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat2);
+	printf("EGL IN nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
+	printf("EGL IN nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
+	printf("EGL IN nBufferSize: %d\n", portFormat2.nBufferSize );
 
-portFormat.nPortIndex = 10;
-portFormat.nBufferCountActual = 1;
-OMX_SetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat);
-OMX_GetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat);
-printf("SHD IN nBufferCountActual: %d\n", portFormat.nBufferCountActual );
-printf("SHD IN nBufferCountMin: %d\n", portFormat.nBufferCountMin );
-printf("SHD IN nBufferSize: %d\n", portFormat.nBufferSize );
+	portFormat2.nPortIndex = 221;
 
-portFormat.nPortIndex = 11;
-portFormat.nBufferCountActual = 1;
-OMX_SetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat);
-OMX_GetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat);
-printf("SHD OUT nBufferCountActual: %d\n", portFormat.nBufferCountActual );
-printf("SHD OUT nBufferCountMin: %d\n", portFormat.nBufferCountMin );
-printf("SHD OUT nBufferSize: %d\n", portFormat.nBufferSize );
-
-portFormat.nPortIndex = 220;
-
-OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
-printf("EGL IN nBufferCountActual: %d\n", portFormat.nBufferCountActual );
-printf("EGL IN nBufferCountMin: %d\n", portFormat.nBufferCountMin );
-printf("EGL IN nBufferSize: %d\n", portFormat.nBufferSize );
-
-portFormat.nPortIndex = 221;
-
-OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
-printf("EGL OUT nBufferCountActual: %d\n", portFormat.nBufferCountActual );
-printf("EGL OUT nBufferCountMin: %d\n", portFormat.nBufferCountMin );
-printf("EGL OUT nBufferSize: %d\n", portFormat.nBufferSize );
-
-
-// portFormat.nBufferCountActual = 1;
-// portFormat.nBufferSize = 4096;
-// portFormat.nPortIndex = 100;
-
-// OMX_SetParameter(ILC_GET_HANDLE (audio_render), OMX_IndexParamPortDefinition, &portFormat);
-// printf("AUD nBufferCountActual: %d\n", portFormat.nBufferCountActual );
-// printf("AUD nBufferCountMin: %d\n", portFormat.nBufferCountMin );
-// printf("AUD nBufferSize: %d\n", portFormat.nBufferSize );
-
-
-
-
+	OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat2);
+	printf("EGL OUT nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
+	printf("EGL OUT nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
+	printf("EGL OUT nBufferSize: %d\n", portFormat2.nBufferSize );
 
 
 
@@ -1195,7 +1141,7 @@ printf("EGL OUT nBufferSize: %d\n", portFormat.nBufferSize );
 	list[3] = video_scheduler;
 	// setup tunnels
 	set_tunnel (video_tunnel, 		video_decode, 		 VIDEO_DECODE_OUT_PORT, 	video_scheduler, 	VIDEO_SCHEDULER_INPUT_PORT);
-	set_tunnel (video_tunnel + 1, 	video_scheduler, 	 VIDEO_SCHEDULER_OUT_PORT,  list[1], 			render_input_port);
+	set_tunnel (video_tunnel + 1, 	video_scheduler, 	 VIDEO_SCHEDULER_OUT_PORT,  egl_render, 		EGL_RENDER_INPUT_PORT);
 	set_tunnel (video_tunnel + 2, 	video_clock, 		 CLOCK_VIDEO_PORT, 			video_scheduler, 	VIDEO_SCHEDULER_CLOCK_PORT);
 	// setup clock tunnel
 	if (ilclient_setup_tunnel (video_tunnel + 2, 0, 0) != 0)
@@ -1297,13 +1243,13 @@ static void close_video ()
 
 	// wait for EOS from render
 	printf("VID: Waiting for EOS from render\n");
-	if (flags & RENDER_2_TEXTURE)
-		// ilclient_wait_for_event(video_decode, OMX_EventBufferFlag, 131, 0, 0, 1, ILCLIENT_BUFFER_FLAG_EOS, 10000);
-		// sleep(0);
-		//ilclient_wait_for_event(video_decode, OMX_EventBufferFlag, VIDEO_DECODE_OUT_PORT, 0, OMX_BUFFERFLAG_EOS, 0, ILCLIENT_BUFFER_FLAG_EOS, 10000);
-		ilclient_wait_for_event(video_decode, OMX_EventBufferFlag, 131, 0, 0, 1, ILCLIENT_BUFFER_FLAG_EOS, 10000);
-	else
-		ilclient_wait_for_event (video_render, OMX_EventBufferFlag, VIDEO_RENDER_INPUT_PORT, 0, OMX_BUFFERFLAG_EOS, 0, ILCLIENT_BUFFER_FLAG_EOS, 10000);
+
+	// ilclient_wait_for_event(video_decode, OMX_EventBufferFlag, 131, 0, 0, 1, ILCLIENT_BUFFER_FLAG_EOS, 10000);
+	// sleep(0);
+	//ilclient_wait_for_event(video_decode, OMX_EventBufferFlag, VIDEO_DECODE_OUT_PORT, 0, OMX_BUFFERFLAG_EOS, 0, ILCLIENT_BUFFER_FLAG_EOS, 10000);
+	// TODO: wair for egl_render?
+	ilclient_wait_for_event(video_decode, OMX_EventBufferFlag, 131, 0, 0, 1, ILCLIENT_BUFFER_FLAG_EOS, 10000);
+
 	// need to flush the renderer to allow video_decode to disable its input port
 	printf("VID: Flushing tunnels\n");
 	ilclient_flush_tunnels        (video_tunnel, 0);
@@ -1721,7 +1667,7 @@ uint64_t rpi_mp_current_time ()
 {
 	OMX_TIME_CONFIG_TIMESTAMPTYPE timestamp;
 	OMX_INIT_STRUCTURE(timestamp);
-	timestamp.nPortIndex		= CLOCK_AUDIO_PORT;
+	timestamp.nPortIndex		= CLOCK_VIDEO_PORT;
 
 	OMX_ERRORTYPE omx_error;
 	if (( omx_error = OMX_GetParameter (ILC_GET_HANDLE (video_clock), OMX_IndexConfigTimeCurrentMediaTime, &timestamp)) != OMX_ErrorNone)
@@ -1941,14 +1887,13 @@ void rpi_mp_deinit ()
 int rpi_mp_open (const char* source, int* image_width, int* image_height, int64_t* duration, int init_flags)
 {
 	int ret = 0;
-	flags = FIRST_VIDEO |
+	flags = FIRST_VIDEO;
 			// FIRST_AUDIO |
-			(init_flags & RENDER_VIDEO_TO_TEXTURE ? RENDER_2_TEXTURE : 0) |
-			(init_flags & ANALOG_AUDIO ? ANALOG_AUDIO_OUT : 0);
+			// (init_flags & RENDER_VIDEO_TO_TEXTURE ? RENDER_2_TEXTURE : 0);
+			// (init_flags & ANALOG_AUDIO ? ANALOG_AUDIO_OUT : 0);
 
-	// egl callback in case we are rendering to texture
-	if (flags & RENDER_2_TEXTURE)
-		ilclient_set_fill_buffer_done_callback (client, fill_egl_texture_buffer, 0);
+	// egl callback
+	ilclient_set_fill_buffer_done_callback (client, fill_egl_texture_buffer, 0);
 
     // open source
 	if (avformat_open_input (&fmt_ctx, source, NULL, NULL) < 0)
@@ -1990,12 +1935,12 @@ int rpi_mp_open (const char* source, int* image_width, int* image_height, int64_
 		// else
 		// 	SET_FLAG(NO_AUDIO_STREAM);
 
-			SET_FLAG(NO_AUDIO_STREAM);
+			// SET_FLAG(NO_AUDIO_STREAM);
 
 		// check that we did get streams
-		if (video_stream_idx == AVERROR_STREAM_NOT_FOUND && audio_stream_idx == AVERROR_STREAM_NOT_FOUND)
+		if (video_stream_idx == AVERROR_STREAM_NOT_FOUND)
 		{
-			fprintf (stderr, "Could not find either audio or video in input, aborting\n");
+			fprintf (stderr, "Could not find video in input, aborting\n");
 			ret = 1;
 			goto end;
 		}
@@ -2006,16 +1951,6 @@ int rpi_mp_open (const char* source, int* image_width, int* image_height, int64_
 		printf("video_stream->duration: %lli\n", video_stream->duration );
 		printf("video_stream->time_base.num: %i\n", video_stream->time_base.num );
 		printf("video_stream->time_base.den: %i\n", video_stream->time_base.den );
-
-		if (~flags & NO_AUDIO_STREAM)
-		{
-			audio_duration = (audio_stream->duration * audio_stream->time_base.num * AV_TIME_BASE) / audio_stream->time_base.den;
-			printf("AUDIO DURATION: %i\n", audio_duration );
-			printf("audio_stream->duration: %lli\n", audio_stream->duration );
-			printf("audio_stream->time_base.num: %i\n", audio_stream->time_base.num );
-			printf("audio_stream->time_base.den: %i\n", audio_stream->time_base.den );
-		}
-
 
 		*duration = fmt_ctx->duration / AV_TIME_BASE;
 
@@ -2046,7 +1981,6 @@ int rpi_mp_open (const char* source, int* image_width, int* image_height, int64_
 	av_packet.size = 0;
 	// init buffers
 	init_packet_buffer (&video_packet_fifo, 1024 * 1024 * 5);
-	init_packet_buffer (&audio_packet_fifo, 1024 * 1024 * 5);
 end:
 	return ret;
 }
