@@ -378,16 +378,14 @@ static int check_arguments (int argc, char** argv)
 
 	if (argc < 2)
 	{
-		printf ("Usage: \n%s [texture] [analog-audio] <source>\n", argv[0]);
+		printf ("Usage: \n%s [loop] <source>\n", argv[0]);
 		return 1;
 	}
 
 	for (i = 0; i < argc; i ++)
 	{
-		if (strcmp (argv[i], "texture") == 0)
-			flags |= RENDER_VIDEO_TO_TEXTURE;
-		else if (strcmp (argv[i], "analog-audio") == 0)
-			flags |= ANALOG_AUDIO;
+		if (strcmp (argv[i], "loop") == 0)
+			flags |= LOOP;
 		else if (strcmp (argv[i], "layer") == 0)
 			layer = atoi(argv[i+1]);
 	}
@@ -411,20 +409,19 @@ int main (int argc, char** argv)
 		flags))
 		return 1;
 
-	if (flags & RENDER_VIDEO_TO_TEXTURE)
-	{
-		init_ogl();
-		init_textures();
-		rpi_mp_setup_render_buffer (egl_images, &current_texture, &texture_ready_mut, &texture_ready_cond);
-	}
+
+	init_ogl();
+	init_textures();
+	rpi_mp_setup_render_buffer (egl_images, &current_texture, &texture_ready_mut, &texture_ready_cond);
 
 	pthread_create (&egl_draw,       NULL, &play_video,   NULL);
 	pthread_create (&input_listener, NULL, &listen_stdin, NULL);
 
     ts();
-	if (flags & RENDER_VIDEO_TO_TEXTURE)
-		while (!done)
-			draw ();
+
+	while (!done)
+		draw ();
+
 	printf("Draw loop finished\n");
 	pthread_cancel (input_listener );
 	printf("input_listener finished\n");

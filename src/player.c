@@ -12,9 +12,6 @@
 #include "rpi_mp_utils.h"
 
 #define FIFO_SLEEPY_TIME               10000
-// #define DIGITAL_AUDIO_DESTINATION_NAME "hdmi"
-// #define ANALOG_AUDIO_DESTINATION_NAME  "local"
-
 
 /* OMX Component ports --------------------- */
 enum omxports
@@ -43,14 +40,11 @@ enum flags
 	PORT_SETTINGS_CHANGED = 0x0010,
 	HARDWARE_DECODE_AUDIO = 0x0020,
 	DONE_READING          = 0x0040,
-	// RENDER_2_TEXTURE      = 0x0080,
-	VIDEO_STOPPED         = 0x0100,
-	// AUDIO_STOPPED         = 0x0200,
-	// ANALOG_AUDIO_OUT      = 0x0400,
-	// NO_AUDIO_STREAM       = 0x0800,
-	LAST_BUFFER           = 0x1000,
-	LAST_FRAME            = 0x2000,
-	CLOCK_PAUSED          = 0x4000,
+	VIDEO_STOPPED         = 0x0080,
+	LAST_BUFFER           = 0x0100,
+	LAST_FRAME            = 0x0200,
+	CLOCK_PAUSED          = 0x0400,
+	LOOP_VIDEO            = 0x0800,
 };
 
 #define OUT_CHANNELS(num_channels) ((num_channels) > 4 ? 8 : (num_channels) > 2 ? 4 : (num_channels))
@@ -1907,10 +1901,8 @@ void rpi_mp_deinit ()
 int rpi_mp_open (const char* source, int* image_width, int* image_height, int64_t* duration, int init_flags)
 {
 	int ret = 0;
-	flags = FIRST_VIDEO;
-			// FIRST_AUDIO |
-			// (init_flags & RENDER_VIDEO_TO_TEXTURE ? RENDER_2_TEXTURE : 0);
-			// (init_flags & ANALOG_AUDIO ? ANALOG_AUDIO_OUT : 0);
+	flags = FIRST_VIDEO |
+			(init_flags & LOOP ? LOOP_VIDEO : 0);
 
 	// egl callback
 	ilclient_set_fill_buffer_done_callback (client, fill_egl_texture_buffer, 0);
@@ -2069,9 +2061,8 @@ int rpi_mp_start ()
 		// printf("------------------------ REMOVE EVENT: %i\n", ilclient_remove_event(egl_render, OMX_EventBufferFlag, 0, 1, 0, 1));
 		SET_FLAG(LAST_FRAME);
 
-#define LOOP 1
 
-		if (!LOOP || (flags & STOPPED))
+		if ((~flags & LOOP_VIDEO) || (flags & STOPPED))
 		{
 			printf("PAC:---end---\n");
 			break;

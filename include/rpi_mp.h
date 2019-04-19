@@ -12,8 +12,7 @@
 /*  FLAGS */
 enum _flags
 {
-	RENDER_VIDEO_TO_TEXTURE = 0x1,
-	ANALOG_AUDIO            = 0x2,
+	LOOP = 0x1,
 }
 rpi_mp_open_flags;
 
