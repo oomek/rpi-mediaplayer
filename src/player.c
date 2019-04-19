@@ -83,7 +83,7 @@ static COMPONENT_T          * video_decode    = NULL,
                             * video_clock     = NULL,
                             * egl_render      = NULL;
 
-static TUNNEL_T               video_tunnel[4];
+static TUNNEL_T               video_tunnel[4]; // last component must be NULL
 static COMPONENT_T          * list[5]; // last component must be NULL
 static ILCLIENT_T           * client;
 
@@ -208,6 +208,20 @@ static int setup_clock ()
 {
 	int ret = 0;
 	// set clock configuration
+
+
+	// OMX_TIME_CONFIG_TIMESTAMPTYPE time_stamp;
+	// OMX_INIT_STRUCTURE(time_stamp);
+	// time_stamp.nPortIndex        = 80;
+	// time_stamp.nTimestamp        = pts__omx_timestamp (1000LL * 1000);
+
+	// if (OMX_SetParameter ( ILC_GET_HANDLE ( video_clock ), OMX_IndexConfigTimeCurrentVideoReference, & time_stamp ) != OMX_ErrorNone )
+	// {
+	// 	printf ("-------------------Could not set timestamp for clock component.\n");
+	//  	ret = -13;
+	// }
+
+
 	OMX_TIME_CONFIG_CLOCKSTATETYPE clock_state;
 	OMX_INIT_STRUCTURE(clock_state);
 	clock_state.eState            = OMX_TIME_ClockStateWaitingForStartTime;
@@ -223,15 +237,6 @@ static int setup_clock ()
 		ret = -13;
 	}
 
-	// if (audio_stream_idx != AVERROR_STREAM_NOT_FOUND)
-	// 	clock_state.nWaitMask = OMX_CLOCKPORT0;
-
-	// clock_state.nOffset			  = pts__omx_timestamp (-1000LL * 1000);
-	// if (audio_clock != NULL && OMX_SetParameter (ILC_GET_HANDLE (audio_clock), OMX_IndexConfigTimeClockState, &clock_state) != OMX_ErrorNone)
-	// {
-	// 	fprintf (stderr, "Error settings parameters for video clock\n");
-	// 	ret = -13;
-	// }
 	return ret;
 }
 
@@ -607,7 +612,7 @@ static void video_decoding_thread ()
 	{
 		while ((~flags & DONE_READING) || (video_packet_fifo.n_packets))
 		{
-			printf("-Video_decoding_thread\n");
+			printf("DEC: Working\n");
 			// printf("%d %d\n",flags, video_packet_fifo.n_packets );
 			// check pause
 			if (flags & PAUSED)
@@ -634,7 +639,7 @@ static void video_decoding_thread ()
 				fprintf (stderr, "Error while decoding, ending thread\n");
 				break;
 			}
-			// usleep(100); // TODO better way of handling excessive CPU usage
+			usleep(FIFO_SLEEPY_TIME); // TODO better way of handling excessive CPU usage
 		}
 		if ((flags & DONE_READING) && (~flags & LAST_BUFFER))
 		{
@@ -662,7 +667,26 @@ static void video_decoding_thread ()
 			// }
 			// // usleep(16666);
 
-			printf("--------------------- EMITTED EOS\n");
+			// if ( OMX_SendCommand ( ILC_GET_HANDLE ( video_decode ), OMX_CommandFlush, 130, NULL ) != OMX_ErrorNone )
+			// 	printf ("Could not flush egl input\n");
+			// if ( OMX_SendCommand ( ILC_GET_HANDLE ( video_decode ), OMX_CommandFlush, 131, NULL ) != OMX_ErrorNone )
+			// 	printf ("Could not flush egl output\n");
+
+			// if ( OMX_SendCommand ( ILC_GET_HANDLE ( video_scheduler ), OMX_CommandFlush, 10, NULL ) != OMX_ErrorNone )
+			// 	printf ("Could not flush egl input\n");
+			// if ( OMX_SendCommand ( ILC_GET_HANDLE ( video_scheduler ), OMX_CommandFlush, 11, NULL ) != OMX_ErrorNone )
+			// 	printf ("Could not flush egl output\n");
+
+			// if ( OMX_SendCommand ( ILC_GET_HANDLE ( egl_render ), OMX_CommandFlush, 220, NULL ) != OMX_ErrorNone )
+			// 	printf ("Could not flush egl input\n");
+			// if ( OMX_SendCommand ( ILC_GET_HANDLE ( egl_render ), OMX_CommandFlush, 221, NULL ) != OMX_ErrorNone )
+			// 	printf ("Could not flush egl output\n");
+
+
+
+
+
+			printf("DEC: --------------------- EMITTED EOS\n");
 			// sleep(2);
 			if ((omx_video_buffer = ilclient_get_input_buffer (video_decode, VIDEO_DECODE_INPUT_PORT, 1)) != NULL)
 			{
@@ -671,13 +695,14 @@ static void video_decoding_thread ()
 				// omx_video_buffer->nFlags 	 =  OMX_BUFFERFLAG_SYNCFRAME | OMX_BUFFERFLAG_EOS | OMX_BUFFERFLAG_DISCONTINUITY;
 				omx_video_buffer->nFlags 	 =  OMX_BUFFERFLAG_SYNCFRAME | OMX_BUFFERFLAG_EOS | OMX_BUFFERFLAG_DISCONTINUITY;
 				if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (video_decode), omx_video_buffer) != OMX_ErrorNone)
-		            printf ("error emptying last buffer\n");
+		            printf ("DEC: error emptying last buffer\n");
 			}
 			SET_FLAG(LAST_BUFFER);
 			// sleep(2);
 		}
 		else
 		{
+			printf("DEC: Sleeping\n");
 			usleep(FIFO_SLEEPY_TIME); // TODO better way of handling excessive CPU usage
 		}
 	}
@@ -687,7 +712,22 @@ static void video_decoding_thread ()
 	// ilclient_wait_for_event(egl_render, OMX_EventBufferFlag, EGL_RENDER_INPUT_PORT, 0, OMX_BUFFERFLAG_EOS, 0, ILCLIENT_BUFFER_FLAG_EOS, 5000);
 	// ilclient_wait_for_event(video_decode, OMX_EventBufferFlag, VIDEO_DECODE_INPUT_PORT, 0, OMX_BUFFERFLAG_EOS, 0, ILCLIENT_BUFFER_FLAG_EOS, 5000);
 	                 // COMPONENT_T *comp, OMX_EVENTTYPE event, OMX_U32 nData1,int ignore1,OMX_U32 nData2, int ignore2, int event_flag, int timeout;
-	printf ("stopping video decoding thread\n");
+	if (flags & STOPPED)
+	{
+		printf ("DEC: Flushing tunnels\n");
+		ilclient_disable_port(video_decode, 131);
+		ilclient_flush_tunnels        (video_tunnel, 1);
+		ilclient_enable_port(video_decode, 131);
+	}
+	printf("DEC: --------------------- EMITTED EOS\n");
+	if ((omx_video_buffer = ilclient_get_input_buffer (video_decode, VIDEO_DECODE_INPUT_PORT, 1)) != NULL)
+	{
+		omx_video_buffer->nFilledLen = 0;
+		omx_video_buffer->nFlags 	 =  OMX_BUFFERFLAG_SYNCFRAME | OMX_BUFFERFLAG_EOS | OMX_BUFFERFLAG_DISCONTINUITY;
+		if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (video_decode), omx_video_buffer) != OMX_ErrorNone)
+            printf ("DEC: error emptying last buffer\n");
+	}
+	printf ("DEC: stopping thread\n");
 }
 
 /**
@@ -1060,7 +1100,7 @@ static int open_video ()
 		fprintf (stderr, "Error creating IL COMPONENT egl render\n");
 		ret = -14;
 	}
-	list[1] = egl_render;
+	list[2] = egl_render;
 	// render_input_port = EGL_RENDER_INPUT_PORT;
 
 
@@ -1138,7 +1178,7 @@ static int open_video ()
 
 
 
-	list[3] = video_scheduler;
+	list[1] = video_scheduler;
 	// setup tunnels
 	set_tunnel (video_tunnel, 		video_decode, 		 VIDEO_DECODE_OUT_PORT, 	video_scheduler, 	VIDEO_SCHEDULER_INPUT_PORT);
 	set_tunnel (video_tunnel + 1, 	video_scheduler, 	 VIDEO_SCHEDULER_OUT_PORT,  egl_render, 		EGL_RENDER_INPUT_PORT);
@@ -1623,7 +1663,7 @@ static int create_hw_clock ()
 	// if (audio_clock == NULL)
 	// 	fprintf (stderr, "Error?\n");
 
-	list[2] = video_clock;
+	list[3] = video_clock;
 	// list[7] = audio_clock;
 	return ret;
 }
@@ -1632,14 +1672,7 @@ static int create_hw_clock ()
 static void cleanup ()
 {
 	destroy_packet_buffer (&video_packet_fifo);
-	// destroy_packet_buffer (&audio_packet_fifo);
 
-	// printf ("  closing streams\n");
-	// if (audio_stream_idx != AVERROR_STREAM_NOT_FOUND)
-	// {
-	// 	close_audio ();
-	// 	printf ("     audio closed\n");
-	// }
 	if (video_stream_idx != AVERROR_STREAM_NOT_FOUND)
 	{
 		close_video ();
@@ -1704,21 +1737,7 @@ int rpi_mp_seek (int64_t position)
 	 	return 0;
 	}
 
-	// ilclient_change_component_state (video_decode, OMX_StatePause);
-	// ilclient_change_component_state (audio_render, OMX_StatePause);
-	// ilclient_change_component_state (video_clock, OMX_StatePause);
-	// ilclient_change_component_state (video_scheduler, OMX_StatePause);
-	// ilclient_change_component_state (egl_render, OMX_StatePause);
-
 	SET_FLAG(CLOCK_PAUSED);
-
-	// disabling this makes audio second pass with preroll
-	// if (( omx_error = OMX_SetParameter ( ILC_GET_HANDLE ( audio_clock ), OMX_IndexConfigTimeClockState, & clock )) != OMX_ErrorNone )
-	// {
-	// 	fprintf ( stderr, "Could not stop clock. Error 0x%08x\n", omx_error );
-	//  	return 0;
-	// }
-
 
 	position *= AV_TIME_BASE;
 	position += fmt_ctx->start_time;
@@ -1755,7 +1774,41 @@ int rpi_mp_seek (int64_t position)
 	flush_buffer ( & video_packet_fifo );
 	// flush_buffer ( & audio_packet_fifo );
 
-	ilclient_flush_tunnels ( video_tunnel, 0 );
+	printf ("Flushing tunnels\n");
+	// ilclient_flush_tunnels ( video_tunnel, 0 );
+
+
+	//TODO: something needs to be flushed to fix premature EOS ?
+
+	// this causes freezing on second pass when pressed "s"
+	// if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (video_decode), omx_video_buffer) != OMX_ErrorNone)
+	// 	printf ("error emptying last buffer\n");
+
+
+	// if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (video_decode), omx_egl_buffers[0]) != OMX_ErrorNone)
+	// 	printf ("error emptying last buffer\n");
+
+	// if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (video_decode), omx_egl_buffers[1]) != OMX_ErrorNone)
+	// 	printf ("error emptying last buffer\n");
+
+    flush_buffer ( & video_packet_fifo );
+
+	ilclient_disable_port(video_decode, 131);
+	ilclient_flush_tunnels        (video_tunnel, 1);
+	ilclient_enable_port(video_decode, 131);
+
+	// ilclient_disable_port(video_decode, 131);
+	// ilclient_disable_port(video_scheduler, 10);
+	// ilclient_disable_port(video_scheduler, 11);
+	// ilclient_disable_port(egl_render, 220);
+
+	// ilclient_flush_tunnels        (video_tunnel, 0);
+
+	// ilclient_enable_port(egl_render, 220);
+	// ilclient_enable_port(video_scheduler, 11);
+	// ilclient_enable_port(video_scheduler, 10);
+	// ilclient_enable_port(video_decode, 131);
+
 
 	// flush video buffer
 	if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( video_decode ), OMX_CommandFlush, VIDEO_DECODE_INPUT_PORT, NULL ) != OMX_ErrorNone ) )
@@ -1798,47 +1851,11 @@ int rpi_mp_seek (int64_t position)
 	// }
 
 
-	// flush audio buffer
-	// if ( ( omx_error = OMX_SendCommand ( ILC_GET_HANDLE ( audio_render ), OMX_CommandFlush, AUDIO_RENDER_INPUT_PORT, NULL ) != OMX_ErrorNone ) )
-	// {
-	// 	fprintf ( stderr, "Could not flush video decoder input (0x%08x)\n", omx_error );
-	// 	return 1;
-	// }
-	// ilclient_flush_tunnels ( audio_tunnel, 0 );
-
 	avcodec_flush_buffers ( video_codec_ctx );
-	// avcodec_flush_buffers ( audio_codec_ctx );
 
-
-
-
-
-
-	// if (( omx_error = OMX_SetParameter ( ILC_GET_HANDLE ( video_clock ), OMX_IndexConfigTimeCurrentVideoReference, & timestamp )) != OMX_ErrorNone )
-	// {
-	// 	fprintf ( stderr, "Could not set timestamp for clock component. Error 0x%08x\n", omx_error );
-	//  	return 0;
-	// }
-
-	// clock.eState    		= OMX_TIME_ClockStateWaitingForStartTime;
-	// clock.nOffset			= pts__omx_timestamp (0);
-
-	// if (( omx_error = OMX_SetConfig ( ILC_GET_HANDLE ( video_clock ), OMX_IndexConfigTimeClockState, & clock )) != OMX_ErrorNone )
-	// {
-	// 	fprintf ( stderr, "Could not start clock. Error 0x%08x\n", omx_error );
-	//  	return 0;
-	// }
-
-	// SET_FLAG ( FIRST_AUDIO );
 	SET_FLAG ( FIRST_VIDEO );
 	unlock();
 	setup_clock();
-
-	// ilclient_change_component_state (audio_render, OMX_StateExecuting);
-	// ilclient_change_component_state (video_clock, OMX_StateExecuting);
-	// ilclient_change_component_state (video_scheduler, OMX_StateExecuting);
-	// ilclient_change_component_state (egl_render, OMX_StateExecuting);
-	// ilclient_change_component_state (video_decode, OMX_StateExecuting);
 
 	if (ret < 0)
 		fprintf (stderr, "could not seek to position: %llu\n (%d)", position, AVERROR (ret));
@@ -2024,7 +2041,7 @@ int rpi_mp_start ()
 
 	while (1)
 	{
-		printf("-read_packets_thread\n");
+		printf("PAC:-read_packets_thread\n");
 		// read packets from source
 		while ((~flags & STOPPED) && (~flags & DONE_READING))
 		{
@@ -2032,23 +2049,23 @@ int rpi_mp_start ()
 			{
 				if (process_packet() != 0)
 				{
-					printf("---------process_packet 0\n");
+					printf("PAC:---------process_packet 0\n");
 					break;
 				}
 			}
 			else
 			{
-				printf("---------done_reading\n");
+				printf("PAC:---------done_reading\n");
 				SET_FLAG (DONE_READING);
 				// sleep(10);
 				// rpi_mp_seek (0); // WOW
 			}
-			usleep(10); // TODO: FINDA A BETTER WAY OF REDUCING CPU USAGE
+			usleep(100); // TODO: FINDA A BETTER WAY OF REDUCING CPU USAGE
 		}
 
-		printf("-waiting for EOS\n");
-		ilclient_wait_for_event(egl_render, OMX_EventBufferFlag, 221, 0, 0, 1, ILCLIENT_BUFFER_FLAG_EOS, -1);
-		printf("-received EOS\n");
+		printf("PAC:-waiting for EOS\n");
+		ilclient_wait_for_event(egl_render, OMX_EventBufferFlag, 221, 0, 0, 1, ILCLIENT_BUFFER_FLAG_EOS, 15000);
+		printf("PAC:-received EOS\n");
 		// printf("------------------------ REMOVE EVENT: %i\n", ilclient_remove_event(egl_render, OMX_EventBufferFlag, 0, 1, 0, 1));
 		SET_FLAG(LAST_FRAME);
 
@@ -2056,7 +2073,7 @@ int rpi_mp_start ()
 
 		if (!LOOP || (flags & STOPPED))
 		{
-			printf("---end---\n");
+			printf("PAC:---end---\n");
 			break;
 		}
 
@@ -2064,7 +2081,7 @@ int rpi_mp_start ()
 		{
 
 
-			printf("---av_seek_frame---\n");
+			printf("PAC:---av_seek_frame---\n");
 			// sleep(1);
 			rpi_mp_seek (0); // WOW
 			// av_seek_frame ( fmt_ctx, -1, 0, AVSEEK_FLAG_FRAME | AVSEEK_FLAG_BACKWARD );
@@ -2078,6 +2095,7 @@ int rpi_mp_start ()
 		}
 		else
 		{
+			printf("PAC: Sleeping\n");
 			usleep(FIFO_SLEEPY_TIME);
 		}
 		// printf("---sleep---\n");
