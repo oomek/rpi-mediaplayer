@@ -159,8 +159,8 @@ static int setup_clock ()
 	clock_state.eState            = OMX_TIME_ClockStateWaitingForStartTime;
 	clock_state.nWaitMask         = 0;
 
-	// Preroll -200 ms works fine, but last 2 frames are not displayed
-	// Preroll 0 loop stops after the second pass
+	// Preroll 0 ms,    from the second pass frames 2 & 3 are skipped, last 2 frames are not displayed
+	// Preroll -200 ms, from the second pass last 2 frames are not displayed
 	clock_state.nOffset			  = pts__omx_timestamp (0LL * 1000);
 	// clock_state.nOffset			  = pts__omx_timestamp (-200LL * 1000);
 
@@ -331,34 +331,6 @@ static inline int decode_video_packet ()
 				}
 			}
 
-			OMX_PARAM_PORTDEFINITIONTYPE portFormat;
-			OMX_INIT_STRUCTURE(portFormat);
-			portFormat.nPortIndex = VIDEO_DECODE_INPUT_PORT;
-
-			OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat);
-			printf("IN nBufferCountActual: %d\n", portFormat.nBufferCountActual );
-			printf("IN nBufferCountMin: %d\n", portFormat.nBufferCountMin );
-			printf("IN nBufferSize: %d\n", portFormat.nBufferSize );
-
-			portFormat.nBufferCountActual = 1;
-			portFormat.nBufferSize = 81920;
-			OMX_SetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat);
-			printf("IN nBufferCountActual: %d\n", portFormat.nBufferCountActual );
-			printf("IN nBufferCountMin: %d\n", portFormat.nBufferCountMin );
-			printf("IN nBufferSize: %d\n", portFormat.nBufferSize );
-
-
-			OMX_PARAM_PORTDEFINITIONTYPE portFormat2;
-			OMX_INIT_STRUCTURE(portFormat2);
-			portFormat2.nPortIndex = VIDEO_DECODE_OUT_PORT;
-
-
-			OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat2);
-			printf("OUT nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
-			printf("OUT nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
-			printf("OUT nBufferSize: %d\n", portFormat2.nBufferSize );
-
-
 			// Set egl_render to executing
 			ilclient_change_component_state (egl_render, OMX_StateExecuting);
 			// Request egl_render to write data to the texture buffer
@@ -423,7 +395,6 @@ static void video_decoding_thread ()
 				fprintf (stderr, "Error while decoding, ending thread\n");
 				break;
 			}
-			usleep(FIFO_SLEEPY_TIME); // TODO better way of handling excessive CPU usage
 		}
 		if ((flags & DONE_READING) && (~flags & LAST_BUFFER))
 		{
@@ -439,7 +410,7 @@ static void video_decoding_thread ()
 		}
 		else
 		{
-			printf("DEC: Sleeping\n");
+			// printf("DEC: Sleeping\n");
 			usleep(FIFO_SLEEPY_TIME); // TODO better way of handling excessive CPU usage
 		}
 	}
@@ -557,41 +528,50 @@ static int open_video ()
 		ret = -13;
 	}
 
-	//scheduler buffer
-	OMX_PARAM_PORTDEFINITIONTYPE portFormat2;
-	OMX_INIT_STRUCTURE(portFormat2);
 
-	portFormat2.nPortIndex = VIDEO_SCHEDULER_INPUT_PORT;
-	portFormat2.nBufferCountActual = 1;
-	OMX_SetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat2);
-	OMX_GetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat2);
-	printf("SHD IN nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
-	printf("SHD IN nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
-	printf("SHD IN nBufferSize: %d\n", portFormat2.nBufferSize );
+	portFormat.nPortIndex = VIDEO_SCHEDULER_INPUT_PORT;
+	// portFormat.nBufferCountActual = 1;
+	// OMX_SetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat);
+	OMX_GetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat);
+	printf("SHD IN  nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+	printf("SHD IN  nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+	printf("SHD IN  nBufferSize: %d\n", portFormat.nBufferSize );
 
-	portFormat2.nPortIndex = VIDEO_SCHEDULER_OUT_PORT;
-	portFormat2.nBufferCountActual = 1;
-	OMX_SetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat2);
-	OMX_GetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat2);
-	printf("SHD OUT nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
-	printf("SHD OUT nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
-	printf("SHD OUT nBufferSize: %d\n", portFormat2.nBufferSize );
+	portFormat.nPortIndex = VIDEO_SCHEDULER_OUT_PORT;
+	// portFormat.nBufferCountActual = 1;
+	// OMX_SetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat);
+	OMX_GetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat);
+	printf("SHD OUT nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+	printf("SHD OUT nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+	printf("SHD OUT nBufferSize: %d\n", portFormat.nBufferSize );
 
-	portFormat2.nPortIndex = EGL_RENDER_INPUT_PORT;
+	portFormat.nPortIndex = EGL_RENDER_INPUT_PORT;
+	OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+	printf("EGL IN  nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+	printf("EGL IN  nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+	printf("EGL IN  nBufferSize: %d\n", portFormat.nBufferSize );
 
-	OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat2);
-	printf("EGL IN nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
-	printf("EGL IN nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
-	printf("EGL IN nBufferSize: %d\n", portFormat2.nBufferSize );
+	portFormat.nPortIndex = EGL_RENDER_OUT_PORT;
+	OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat);
+	printf("EGL OUT nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+	printf("EGL OUT nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+	printf("EGL OUT nBufferSize: %d\n", portFormat.nBufferSize );
 
-	portFormat2.nPortIndex = EGL_RENDER_OUT_PORT;
+	portFormat.nPortIndex = VIDEO_DECODE_INPUT_PORT;
+	// portFormat.nBufferCountActual = 2; //default 20
+	// OMX_SetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat);
+	OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat);
+	printf("DEC IN  nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+	printf("DEC IN  nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+	printf("DEC IN  nBufferSize: %d\n", portFormat.nBufferSize );
 
-	OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat2);
-	printf("EGL OUT nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
-	printf("EGL OUT nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
-	printf("EGL OUT nBufferSize: %d\n", portFormat2.nBufferSize );
-
-
+	portFormat.nPortIndex = VIDEO_DECODE_OUT_PORT;
+	// portFormat.nBufferCountActual = 1; //default 20
+	// OMX_SetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat);
+	OMX_GetParameter(ILC_GET_HANDLE (video_decode), OMX_IndexParamPortDefinition, &portFormat);
+	printf("DEC OUT nBufferCountActual: %d\n", portFormat.nBufferCountActual );
+	printf("DEC OUT nBufferCountMin: %d\n", portFormat.nBufferCountMin );
+	printf("DEC OUT nBufferSize: %d\n", portFormat.nBufferSize );
 
 
 	list[1] = video_scheduler;
@@ -823,8 +803,8 @@ uint64_t rpi_mp_current_time ()
 // TODO implement correctly
 int rpi_mp_seek (int64_t position)
 {
-	// make sure we are paused first
-	// if ( ~flags & PAUSED ) pause_playback ();
+	printf ( "SEEK: Trying to rewind\n" );
+
 	lock();
 
 	OMX_TIME_CONFIG_CLOCKSTATETYPE clock;
@@ -841,24 +821,6 @@ int rpi_mp_seek (int64_t position)
 
 	// seek to frame
 	int ret = av_seek_frame ( fmt_ctx, -1, 0, AVSEEK_FLAG_FRAME | AVSEEK_FLAG_BACKWARD );
-
-	printf ( "SEEK: Trying to rewind\n" );
-
-	// printf ("SEEK: Flushing tunnels\n");
-	// ilclient_flush_tunnels ( video_tunnel, 0 );
-
-
-	//TODO: something needs to be flushed to fix premature EOS ?
-
-	// this causes freezing on second pass when pressed "s"
-	// if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (video_decode), omx_video_buffer) != OMX_ErrorNone)
-	// 	printf ("error emptying last buffer\n");
-
-	// if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (video_decode), omx_egl_buffers[0]) != OMX_ErrorNone)
-	// 	printf ("error emptying last buffer\n");
-
-	// if (OMX_EmptyThisBuffer (ILC_GET_HANDLE (video_decode), omx_egl_buffers[1]) != OMX_ErrorNone)
-	// 	printf ("error emptying last buffer\n");
 
 	printf ("SEEK: Flushing FIFO\n");
     flush_buffer ( & video_packet_fifo );
