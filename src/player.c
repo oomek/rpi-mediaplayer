@@ -24,10 +24,7 @@ enum omxports
 	VIDEO_SCHEDULER_CLOCK_PORT  =  12,
 	EGL_RENDER_INPUT_PORT       = 220,
 	EGL_RENDER_OUT_PORT         = 221,
-	// AUDIO_RENDER_INPUT_PORT     = 100,
-	// AUDIO_RENDER_CLOCK_PORT     = 101,
 	CLOCK_VIDEO_PORT            =  80,
-	// CLOCK_AUDIO_PORT            =  80
 };
 
 /* FLAGS ----------------------------------- */
@@ -490,7 +487,7 @@ static inline int decode_video_packet ()
 
 			ilclient_change_component_state (egl_render, OMX_StateIdle);
 			// Enable the output port and tell egl_render to use the texture as a buffer
-			//ilclient_enable_port(egl_render, 221); THIS BLOCKS SO CANT BE USED
+			//ilclient_enable_port(egl_render, EGL_RENDER_OUT_PORT); THIS BLOCKS SO CANT BE USED
 			if (OMX_SendCommand (ILC_GET_HANDLE (egl_render), OMX_CommandPortEnable, EGL_RENDER_OUT_PORT, NULL) != OMX_ErrorNone)
 			{
 				fprintf (stderr, "OMX_CommandPortEnable failed.\n");
@@ -709,9 +706,9 @@ static void video_decoding_thread ()
 	if (flags & STOPPED)
 	{
 		printf ("DEC: Flushing tunnels\n");
-		ilclient_disable_port(video_decode, 131);
+		ilclient_disable_port(video_decode, VIDEO_DECODE_OUT_PORT);
 		ilclient_flush_tunnels        (video_tunnel, 1);
-		ilclient_enable_port(video_decode, 131);
+		ilclient_enable_port(video_decode, VIDEO_DECODE_OUT_PORT);
 	}
 	printf("DEC: --------------------- EMITTED EOS\n");
 	if ((omx_video_buffer = ilclient_get_input_buffer (video_decode, VIDEO_DECODE_INPUT_PORT, 1)) != NULL)
@@ -1114,7 +1111,7 @@ static int open_video ()
 
 	OMX_CONFIG_PORTBOOLEANTYPE discardMode;
 	OMX_INIT_STRUCTURE(discardMode);
-	discardMode.nPortIndex = 220;
+	discardMode.nPortIndex = EGL_RENDER_INPUT_PORT;
 	if (OMX_GetParameter(ILC_GET_HANDLE(egl_render), OMX_IndexParamBrcmVideoEGLRenderDiscardMode, &discardMode) != OMX_ErrorNone)
 		printf("OMX_IndexParamBrcmVideoEGLRenderDiscardMode failed.\n");
 	else
@@ -1137,7 +1134,7 @@ static int open_video ()
 	OMX_PARAM_PORTDEFINITIONTYPE portFormat2;
 	OMX_INIT_STRUCTURE(portFormat2);
 
-	portFormat2.nPortIndex = 10;
+	portFormat2.nPortIndex = VIDEO_SCHEDULER_INPUT_PORT;
 	portFormat2.nBufferCountActual = 1;
 	OMX_SetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat2);
 	OMX_GetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat2);
@@ -1145,7 +1142,7 @@ static int open_video ()
 	printf("SHD IN nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
 	printf("SHD IN nBufferSize: %d\n", portFormat2.nBufferSize );
 
-	portFormat2.nPortIndex = 11;
+	portFormat2.nPortIndex = VIDEO_SCHEDULER_OUT_PORT;
 	portFormat2.nBufferCountActual = 1;
 	OMX_SetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat2);
 	OMX_GetParameter(ILC_GET_HANDLE (video_scheduler), OMX_IndexParamPortDefinition, &portFormat2);
@@ -1155,14 +1152,14 @@ static int open_video ()
 
 
 
-	portFormat2.nPortIndex = 220;
+	portFormat2.nPortIndex = EGL_RENDER_INPUT_PORT;
 
 	OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat2);
 	printf("EGL IN nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
 	printf("EGL IN nBufferCountMin: %d\n", portFormat2.nBufferCountMin );
 	printf("EGL IN nBufferSize: %d\n", portFormat2.nBufferSize );
 
-	portFormat2.nPortIndex = 221;
+	portFormat2.nPortIndex = EGL_RENDER_OUT_PORT;
 
 	OMX_GetParameter(ILC_GET_HANDLE (egl_render), OMX_IndexParamPortDefinition, &portFormat2);
 	printf("EGL OUT nBufferCountActual: %d\n", portFormat2.nBufferCountActual );
@@ -1282,7 +1279,7 @@ static void close_video ()
 	// sleep(0);
 	//ilclient_wait_for_event(video_decode, OMX_EventBufferFlag, VIDEO_DECODE_OUT_PORT, 0, OMX_BUFFERFLAG_EOS, 0, ILCLIENT_BUFFER_FLAG_EOS, 10000);
 	// TODO: wair for egl_render?
-	ilclient_wait_for_event(video_decode, OMX_EventBufferFlag, 131, 0, 0, 1, ILCLIENT_BUFFER_FLAG_EOS, 10000);
+	ilclient_wait_for_event(video_decode, OMX_EventBufferFlag, VIDEO_DECODE_OUT_PORT, 0, 0, 1, ILCLIENT_BUFFER_FLAG_EOS, 10000);
 
 	// need to flush the renderer to allow video_decode to disable its input port
 	printf("VID: Flushing tunnels\n");
@@ -1787,9 +1784,9 @@ int rpi_mp_seek (int64_t position)
 
     flush_buffer ( & video_packet_fifo );
 
-	ilclient_disable_port(video_decode, 131);
+	ilclient_disable_port(video_decode, VIDEO_DECODE_OUT_PORT);
 	ilclient_flush_tunnels        (video_tunnel, 1);
-	ilclient_enable_port(video_decode, 131);
+	ilclient_enable_port(video_decode, VIDEO_DECODE_OUT_PORT);
 
 	// ilclient_disable_port(video_decode, 131);
 	// ilclient_disable_port(video_scheduler, 10);
@@ -2056,7 +2053,7 @@ int rpi_mp_start ()
 		}
 
 		printf("PAC:-waiting for EOS\n");
-		ilclient_wait_for_event(egl_render, OMX_EventBufferFlag, 221, 0, 0, 1, ILCLIENT_BUFFER_FLAG_EOS, 15000);
+		ilclient_wait_for_event(egl_render, OMX_EventBufferFlag, EGL_RENDER_OUT_PORT, 0, 0, 1, ILCLIENT_BUFFER_FLAG_EOS, 15000);
 		printf("PAC:-received EOS\n");
 		// printf("------------------------ REMOVE EVENT: %i\n", ilclient_remove_event(egl_render, OMX_EventBufferFlag, 0, 1, 0, 1));
 		SET_FLAG(LAST_FRAME);
@@ -2166,7 +2163,7 @@ void rpi_mp_stop ()
 	if (video_stream_idx != AVERROR_STREAM_NOT_FOUND)
 	{
 		OMX_ERRORTYPE omx_error;
-		if ((omx_error = OMX_SendCommand (ILC_GET_HANDLE (video_decode), OMX_CommandFlush, 130, NULL) != OMX_ErrorNone))
+		if ((omx_error = OMX_SendCommand (ILC_GET_HANDLE (video_decode), OMX_CommandFlush, VIDEO_DECODE_INPUT_PORT, NULL) != OMX_ErrorNone))
 			fprintf (stderr, "Could not flush video decoder input (0x%08x)\n", omx_error);
 	}
 	// if ((omx_video_buffer = ilclient_get_input_buffer (video_decode, VIDEO_DECODE_INPUT_PORT, 1)) != NULL)

@@ -251,26 +251,13 @@ static void init_ogl ()
 	assert(EGL_FALSE != result);
 
 	// Set background color and clear buffers
-	glClearColor (0.1f, 0.1f, 0.1f, 1.0f);
-
-	// Enable back face culling.
-	//glEnable (GL_CULL_FACE);
-
-
-	// float nearp = 1.0f;
-	// float farp = 500.0f;
-	// float hht = nearp * (float)tan(45.0 / 2.0 / 180.0 * M_PI);
-	// float hwd = hht * (float) screen_width / (float) screen_height;
+	glClearColor (0.0f, 0.0f, 0.0f, 1.0f);
 
 	glViewport(0, 0, (GLsizei) screen_width / div, (GLsizei) screen_height / div);
 	glMatrixMode(GL_PROJECTION);
 	glLoadIdentity();
 
-	// glFrustumf(-hwd, hwd, -hht, hht, nearp, farp);
 	glOrthof(0, 1, 0, 1, - 1, 1);
-
-	// glMatrixMode(GL_MODELVIEW);
-	// glLoadIdentity();
 
 	glVertexPointer( 3, GL_BYTE, 0, quad_vertex );
 	glEnableClientState( GL_VERTEX_ARRAY );
