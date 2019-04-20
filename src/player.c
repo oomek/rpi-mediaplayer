@@ -262,6 +262,8 @@ static inline int decode_video_packet ()
 	int packet_size = 0;
 	int64_t timestamp = int64_timestamp (video_packet);
 
+	printf("DEC: Timestamp %llu\n", timestamp );
+
 	while (video_packet.size > 0)
 	{
 		if ((omx_video_buffer = ilclient_get_input_buffer (video_decode, VIDEO_DECODE_INPUT_PORT, 1)) == NULL)
@@ -394,7 +396,7 @@ static void video_decoding_thread ()
 	{
 		while ((~flags & DONE_READING) || (video_packet_fifo.n_packets))
 		{
-			printf("DEC: Working\n");
+			// printf("DEC: Working\n");
 
 			// check pause
 			if (flags & PAUSED)
