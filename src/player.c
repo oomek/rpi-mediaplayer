@@ -158,8 +158,12 @@ static int setup_clock ()
 	OMX_INIT_STRUCTURE(clock_state);
 	clock_state.eState            = OMX_TIME_ClockStateWaitingForStartTime;
 	clock_state.nWaitMask         = 0;
-	clock_state.nOffset			  = pts__omx_timestamp (0LL * 1000);
+
 	// TODO find a correct preroll so no first few frames are skipped after looping and it does not cause any unneccesary delay
+	// preroll -200 ms works fine, but last 2 frames are not displayed
+	// preroll 0 loop stops on the second pass
+	clock_state.nOffset			  = pts__omx_timestamp (0LL * 1000);
+	// clock_state.nOffset			  = pts__omx_timestamp (-200LL * 1000);
 
 	if (video_stream_idx != AVERROR_STREAM_NOT_FOUND)
 		clock_state.nWaitMask = OMX_CLOCKPORT0;
