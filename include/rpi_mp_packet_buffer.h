@@ -1,3 +1,4 @@
+#include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <pthread.h>
 
@@ -20,8 +21,15 @@ typedef struct
 	AVPacket      * _front;
 	AVPacket      * _back;
 	pthread_mutex_t mutex;
+	uint            preload;
 } packet_buffer ;
 
+typedef struct
+{
+	int64_t         timestamp;
+	AVPacket      * packet;
+	uint            filled;
+} sorted_packets;
 
 /**
  *	Initialize the FIFO buffer.
@@ -56,7 +64,7 @@ void destroy_packet_buffer ( packet_buffer * buffer ) ;
  *	@return int ret
  *		0 on success, non-zero on failure.
  */
-int push_packet ( packet_buffer * buffer, AVPacket   p ) ;
+int push_packet ( packet_buffer *buffer, AVPacket *p ) ;
 
 /**
  *	Pops the first packet from the fifo queue.
@@ -69,9 +77,9 @@ int push_packet ( packet_buffer * buffer, AVPacket   p ) ;
  *	@return int ret
  *		zero on success, non-zero on failure
  */
-int pop_packet ( packet_buffer * buffer, AVPacket * p ) ;
+int pop_packet ( packet_buffer *buffer, AVFormatContext *fmt_ctx, AVPacket *p ) ;
 
 /**
  *	Pops any packets that are left in the buffer and thereby reseting it
  */
-void flush_buffer ( packet_buffer * buffer ) ;
+void flush_buffer ( packet_buffer *buffer ) ;

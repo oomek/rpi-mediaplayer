@@ -1,6 +1,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 #include "rpi_mp_utils.h"
 
@@ -20,13 +21,13 @@ void flt_to_s16 (uint8_t *flt, uint8_t **s16, int size)
 unsigned long time_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    return (ts.tv_sec*1000000 + ts.tv_nsec/1000) / 1000;
+    return ((unsigned long)ts.tv_sec*1000000 + ts.tv_nsec/1000) / 1000;
 }
 
 unsigned long time_us(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    return (ts.tv_sec*1000000 + ts.tv_nsec/1000);
+    return ((unsigned long)ts.tv_sec*1000000 + ts.tv_nsec/1000);
 }
 
 void ts(void)

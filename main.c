@@ -9,6 +9,7 @@
 #include "bcm_host.h"
 #include <math.h>
 #include "rpi_mp_utils.h"
+#include <mcheck.h>
 
 
 #ifndef M_PI
@@ -46,7 +47,7 @@ static const GLfloat quad_uv[4 * 2] = {
 	1.f,  0.f,
 };
 
-static const GLbyte quad_vertex[4 * 3] = {
+static const GLfloat quad_vertex[4 * 3] = {
 	0.f, 0.f, 0.f,
 	1.f, 0.f, 0.f,
 	0.f, 1.f, 0.f,
@@ -259,7 +260,7 @@ static void init_ogl ()
 
 	glOrthof(0, 1, 0, 1, - 1, 1);
 
-	glVertexPointer( 3, GL_BYTE, 0, quad_vertex );
+	glVertexPointer( 3, GL_FLOAT, 0, quad_vertex );
 	glEnableClientState( GL_VERTEX_ARRAY );
 
 	glColorPointer( 4, GL_FLOAT, 0, quad_colors );
@@ -334,14 +335,14 @@ static void draw ()
 
 
 	// moving bar
-	// bar_x += 4.0 / (float)screen_width;
-	// if (bar_x > 1.0 - (32.0 / (float)screen_width)) bar_x = 0.0;
+	bar_x += 4.0 / (float)screen_width;
+	if (bar_x > 1.0 - (32.0 / (float)screen_width)) bar_x = 0.0;
 
-	// glEnableClientState( GL_COLOR_ARRAY );
-	// glLoadIdentity ();
-	// glTranslatef   (bar_x, 0.0, 0.0);
-	// glScalef   (32.0 / (float)screen_width, 1.0, 0.0);
-	// glDrawArrays   (GL_TRIANGLE_STRIP, 0, 4);
+	glEnableClientState( GL_COLOR_ARRAY );
+	glLoadIdentity ();
+	glTranslatef   (bar_x, 0.0, 0.0);
+	glScalef   (32.0 / (float)screen_width, 1.0, 0.0);
+	glDrawArrays   (GL_TRIANGLE_STRIP, 0, 4);
 
 
 
@@ -384,7 +385,7 @@ int main (int argc, char** argv)
 {
 	// this switches egl window from triple to double buffering
 	// setenv("V3D_DOUBLE_BUFFER", "1", 1);
-
+	mtrace();
 	if (check_arguments (argc, argv))
 		return 1;
 	bcm_host_init ();
@@ -408,7 +409,7 @@ int main (int argc, char** argv)
 
 	while (!done)
 		draw ();
-
+	// sleep(2);
 	printf("Draw loop finished\n");
 	pthread_cancel (input_listener );
 	printf("input_listener finished\n");

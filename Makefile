@@ -42,13 +42,13 @@ DEFINES = -DSTANDALONE \
 
 CFLAGS += -Wall \
           -Winline \
-          -O1 \
           -fPIC \
           -ftree-vectorize \
           -pipe \
           -Wno-psabi \
           -Wno-deprecated-declarations \
-          #-g3
+          -g3 \
+          #-O \
 
 INCLUDES = -I./include \
            -I/usr/local/include \
